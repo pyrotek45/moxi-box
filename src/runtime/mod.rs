@@ -1,8 +1,12 @@
 mod agent;
+mod context;
 
 use std::{
     collections::VecDeque,
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, Sender},
+    },
     thread,
 };
 
@@ -15,7 +19,32 @@ use crate::{
     tools,
 };
 
-pub fn start(command_receiver: Receiver<AppCommand>, event_sender: Sender<AppEvent>) {
+struct EventSender {
+    channel: Sender<AppEvent>,
+    wake: Box<dyn Fn() + Send>,
+}
+impl EventSender {
+    fn send(&self, event: AppEvent) -> bool {
+        let result = self.channel.send(event).is_ok();
+        (self.wake)();
+        result
+    }
+}
+
+pub(super) struct AgentRequest {
+    settings: Settings,
+    content: String,
+}
+
+pub fn start(
+    command_receiver: Receiver<AppCommand>,
+    event_sender: Sender<AppEvent>,
+    wake: impl Fn() + Send + 'static,
+) {
+    let event_sender = EventSender {
+        channel: event_sender,
+        wake: Box::new(wake),
+    };
     thread::Builder::new()
         .name("moxi-box-backend".to_owned())
         .spawn(move || {
@@ -57,36 +86,92 @@ fn handle(
     command: AppCommand,
     store: &Store,
     runtime: &Runtime,
-    events: &Sender<AppEvent>,
+    events: &EventSender,
     commands: &Receiver<AppCommand>,
     deferred: &mut VecDeque<AppCommand>,
 ) {
     match command {
         AppCommand::Load => match store.load() {
-            Ok((settings, tasks, messages)) => send(
-                events,
-                AppEvent::Loaded {
-                    settings,
-                    tasks,
-                    messages,
-                },
-            ),
+            Ok((settings, tasks, messages)) => {
+                send(
+                    events,
+                    AppEvent::Loaded {
+                        settings,
+                        tasks,
+                        messages,
+                    },
+                );
+                sync_conversation(store, events);
+            }
             Err(error) => fail(events, error),
         },
         AppCommand::SaveSettings(settings) => match store.save_settings(&settings) {
-            Ok(()) => send(events, AppEvent::Notice("Settings saved.".to_owned())),
+            Ok(()) => {}
             Err(error) => fail(events, error),
         },
-        AppCommand::RefreshModels { base_url } => {
-            match runtime.block_on(lm_studio::list_models(&base_url)) {
-                Ok(models) => {
-                    send(events, AppEvent::ConnectionChanged(true));
-                    send(events, AppEvent::ModelsLoaded(models));
-                }
-                Err(error) => {
-                    send(events, AppEvent::ConnectionChanged(false));
-                    fail(events, error)
-                }
+        AppCommand::RefreshModels {
+            request_id,
+            base_url,
+            cancelled,
+        } => {
+            let result = runtime.block_on(lm_studio::list_models(&base_url, &cancelled));
+            send(events, AppEvent::ModelsLoaded { request_id, result });
+        }
+        AppCommand::NewConversation { workspace } => match store.new_conversation(&workspace) {
+            Ok(()) => sync_conversation(store, events),
+            Err(error) => fail(events, error),
+        },
+        AppCommand::SelectConversation { workspace, id } => {
+            match store.select_conversation(&workspace, id) {
+                Ok(()) => sync_conversation(store, events),
+                Err(error) => fail(events, error),
+            }
+        }
+        AppCommand::SaveMemory { workspace, content } => {
+            match store.save_memory(&workspace, &content) {
+                Ok(()) => sync_conversation(store, events),
+                Err(error) => fail(events, error),
+            }
+        }
+        AppCommand::ListFolders { path, request_id } => {
+            send(
+                events,
+                AppEvent::FoldersListed {
+                    request_id,
+                    result: tools::list_folders(&path),
+                },
+            );
+        }
+        AppCommand::ResetWorkspace { path } => {
+            let result = tools::reset_workspace(&path).and_then(|backup| {
+                store.new_conversation(&path)?;
+                store.add_message(
+                    MessageRole::Assistant,
+                    &format!("Workspace reset. Original files are archived at:\n{backup}"),
+                )?;
+                send(
+                    events,
+                    AppEvent::Notice(format!(
+                        "Project reset. Original files archived at {backup}"
+                    )),
+                );
+                tools::open_workspace(&path, false)
+            });
+            let success = result.is_ok();
+            send(events, AppEvent::WorkspaceOpened(result));
+            if success {
+                sync_conversation(store, events);
+            }
+        }
+        AppCommand::OpenWorkspace { path, create } => {
+            let result = tools::open_workspace(&path, create).and_then(|(root, entries)| {
+                store.select_workspace(&root)?;
+                Ok((root, entries))
+            });
+            let success = result.is_ok();
+            send(events, AppEvent::WorkspaceOpened(result));
+            if success {
+                sync_conversation(store, events);
             }
         }
         AppCommand::BrowseWorkspace { root } => match tools::workspace_entries(&root) {
@@ -114,13 +199,20 @@ fn handle(
             settings,
             content,
             agent_mode,
+            cancelled,
         } => {
             if agent_mode {
                 agent::run_agent(
-                    store, runtime, events, commands, deferred, settings, content,
+                    store,
+                    runtime,
+                    events,
+                    commands,
+                    deferred,
+                    AgentRequest { settings, content },
+                    &cancelled,
                 )
             } else {
-                send_chat(store, runtime, events, settings, content)
+                send_chat(store, runtime, events, settings, content, &cancelled)
             }
         }
         AppCommand::ResolveApproval { .. } => {
@@ -132,9 +224,10 @@ fn handle(
 fn send_chat(
     store: &Store,
     runtime: &Runtime,
-    events: &Sender<AppEvent>,
+    events: &EventSender,
     settings: crate::domain::Settings,
     content: String,
+    cancelled: &AtomicBool,
 ) {
     if content.trim().is_empty() {
         return;
@@ -142,7 +235,7 @@ fn send_chat(
     let user_id = match store.add_message(MessageRole::User, content.trim()) {
         Ok(id) => id,
         Err(error) => {
-            fail_run(events, error);
+            send(events, AppEvent::RunFailed(error));
             return;
         }
     };
@@ -157,49 +250,99 @@ fn send_chat(
     let assistant_id = match store.add_message(MessageRole::Assistant, "") {
         Ok(id) => id,
         Err(error) => {
-            fail_run(events, error);
+            fail_run(store, events, error);
             return;
         }
     };
     send(events, AppEvent::ChatStarted { id: assistant_id });
-    let history = match store.load() {
-        Ok((_, _, messages)) => messages,
+    let history = match context::prepare(store, runtime, &settings, events, cancelled) {
+        Ok(messages) => messages,
         Err(error) => {
-            fail_run(events, error);
+            fail_run(store, events, error);
             return;
         }
     };
-    let result = runtime.block_on(lm_studio::stream_chat(&settings, &history, |text| {
-        send(
-            events,
-            AppEvent::ChatDelta {
-                id: assistant_id,
-                text,
-            },
-        )
-    }));
+    let mut partial = String::new();
+    let mut checkpoint = std::time::Instant::now();
+    let mut checkpoint_error = None;
+    let result = runtime.block_on(lm_studio::stream_chat(
+        &settings,
+        &history,
+        cancelled,
+        |text| {
+            partial.push_str(&text);
+            if checkpoint.elapsed() >= std::time::Duration::from_millis(250) {
+                if let Err(error) = store.replace_message_content(assistant_id, &partial) {
+                    checkpoint_error = Some(error);
+                }
+                checkpoint = std::time::Instant::now();
+            }
+            send(
+                events,
+                AppEvent::ChatDelta {
+                    id: assistant_id,
+                    text,
+                },
+            )
+        },
+    ));
+    if let Err(error) = store.replace_message_content(assistant_id, &partial) {
+        fail_run(store, events, error);
+        return;
+    }
+    if let Some(error) = checkpoint_error {
+        fail_run(store, events, error);
+        return;
+    }
     match result {
         Ok(content) => match store.replace_message_content(assistant_id, &content) {
             Ok(()) => {
                 send(events, AppEvent::ConnectionChanged(true));
                 send(events, AppEvent::ChatFinished { id: assistant_id });
             }
-            Err(error) => fail_run(events, error),
+            Err(error) => fail_run(store, events, error),
         },
         Err(error) => {
-            send(events, AppEvent::ConnectionChanged(false));
-            fail_run(events, error);
+            if !cancelled.load(Ordering::Acquire) {
+                send(events, AppEvent::ConnectionChanged(false));
+            }
+            fail_run(store, events, error);
         }
     }
 }
 
-fn send(events: &Sender<AppEvent>, event: AppEvent) {
+fn send(events: &EventSender, event: AppEvent) {
     let _ = events.send(event);
 }
-fn fail(events: &Sender<AppEvent>, error: String) {
+fn fail(events: &EventSender, error: String) {
     send(events, AppEvent::Error(error));
 }
 
-fn fail_run(events: &Sender<AppEvent>, error: String) {
+fn fail_run(store: &Store, events: &EventSender, error: String) {
+    if let Ok(state) = store.conversation_state() {
+        if let Some(message) = state
+            .messages
+            .last()
+            .filter(|m| m.role == MessageRole::Assistant)
+        {
+            let suffix = format!("\n\n[Run interrupted: {error}]");
+            let _ = store
+                .replace_message_content(message.id, &format!("{}{}", message.content, suffix));
+            send(
+                events,
+                AppEvent::ChatDelta {
+                    id: message.id,
+                    text: suffix,
+                },
+            );
+        }
+    }
     send(events, AppEvent::RunFailed(error));
+}
+
+fn sync_conversation(store: &Store, events: &EventSender) {
+    match store.conversation_state() {
+        Ok(state) => send(events, AppEvent::ConversationLoaded(state)),
+        Err(error) => fail(events, error),
+    }
 }
