@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::{json, Value};
 
-use crate::core::{Settings, WorkspaceEntry};
+use crate::domain::{Settings, WorkspaceEntry};
 
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_SEARCH_RESULTS: usize = 50;
@@ -124,14 +124,24 @@ fn safe_path(root: &Path, input: &str, may_not_exist: bool) -> Result<PathBuf, S
         return Err("Path must be relative to the workspace.".to_owned());
     }
     let candidate = root.join(relative);
-    let checked = if may_not_exist {
-        fs::canonicalize(candidate.parent().unwrap_or(root))
-            .map_err(|error| error.to_string())?
-            .join(
-                candidate
+    let checked = if may_not_exist && fs::symlink_metadata(&candidate).is_err() {
+        let mut ancestor = candidate.as_path();
+        let mut missing = Vec::new();
+        while fs::symlink_metadata(ancestor).is_err() {
+            missing.push(
+                ancestor
                     .file_name()
                     .ok_or_else(|| "Invalid file path.".to_owned())?,
-            )
+            );
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| "Invalid file path.".to_owned())?;
+        }
+        let mut checked = fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+        for component in missing.into_iter().rev() {
+            checked.push(component);
+        }
+        checked
     } else {
         fs::canonicalize(&candidate).map_err(|error| error.to_string())?
     };
@@ -164,6 +174,13 @@ fn collect_entries(
     for child in children {
         if entries.len() >= MAX_TREE_ENTRIES {
             break;
+        }
+        if child
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_symlink()
+        {
+            continue;
         }
         let path = child.path();
         let name = child.file_name().to_string_lossy().to_string();
@@ -213,11 +230,18 @@ fn search_directory(
         if found.len() >= MAX_SEARCH_RESULTS {
             break;
         }
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_symlink()
+        {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             if !path
                 .file_name()
-                .is_some_and(|name| name == ".git" || name == "target")
+                .is_some_and(|name| name == ".git" || name == "target" || name == "node_modules")
             {
                 search_directory(root, &path, query, found)?;
             }
@@ -278,6 +302,80 @@ fn run_command(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    text.truncate(MAX_COMMAND_OUTPUT_BYTES);
+    let mut end = text.len().min(MAX_COMMAND_OUTPUT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "moxi-tools-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn writes_nested_files_but_rejects_traversal() {
+        let fixture = Fixture::new();
+        write_file(&fixture.0, "nested/deep/file.txt", "hello").unwrap();
+        assert_eq!(
+            read_file(&fixture.0, "nested/deep/file.txt").unwrap(),
+            "hello"
+        );
+        assert!(write_file(&fixture.0, "../escape.txt", "bad").is_err());
+        assert!(read_file(&fixture.0, "/etc/passwd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_escape_or_recurse() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let outside = Fixture::new();
+        fs::write(outside.0.join("secret"), "private").unwrap();
+        symlink(outside.0.join("secret"), fixture.0.join("link")).unwrap();
+        symlink(&outside.0, fixture.0.join("directory")).unwrap();
+        symlink(&fixture.0, fixture.0.join("cycle")).unwrap();
+        assert!(write_file(&fixture.0, "link", "bad").is_err());
+        assert!(write_file(&fixture.0, "directory/new/file", "bad").is_err());
+        assert!(read_file(&fixture.0, "link").is_err());
+        assert!(workspace_entries(fixture.0.to_str().unwrap())
+            .unwrap()
+            .is_empty());
+        assert!(search_content(&fixture.0, "private").unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(outside.0.join("secret")).unwrap(),
+            "private"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_truncates_on_a_character_boundary() {
+        let fixture = Fixture::new();
+        let args = vec![json!("-c"), json!("printf 'é%.0s' $(seq 1 20000)")];
+        let result = run_command(&fixture.0, "bash", Some(&args)).unwrap();
+        assert!(result.len() <= MAX_COMMAND_OUTPUT_BYTES);
+        assert!(result.contains('é'));
+    }
 }
