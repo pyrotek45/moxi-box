@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use rusqlite::{params, Connection};
 
-use crate::core::{ChatMessage, MessageRole, Settings, Task, MAX_STORED_MESSAGES};
+use crate::domain::{ChatMessage, MessageRole, Settings, Task, MAX_STORED_MESSAGES};
 
 const DATABASE_DIRECTORY: &str = "moxi-box";
 const DATABASE_FILENAME: &str = "moxi-box.sqlite";
