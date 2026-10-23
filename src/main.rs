@@ -1,11 +1,11 @@
-mod backend;
-mod core;
-mod models;
+mod app;
+mod domain;
+mod provider;
+mod runtime;
 mod storage;
 mod tools;
 mod ui;
-mod widgets;
 
 fn main() -> eframe::Result<()> {
-    ui::run()
+    app::run()
 }

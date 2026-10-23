@@ -137,4 +137,5 @@ pub enum AppEvent {
     },
     Notice(String),
     Error(String),
+    RunFailed(String),
 }
