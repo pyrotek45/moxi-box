@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use eframe::egui::{self, Align, Color32, Layout, RichText, ScrollArea};
 
 use super::MoxiBoxApp;
@@ -9,19 +7,20 @@ use crate::{
 };
 
 mod conversation;
+mod dialogs;
 mod header;
 mod sidebar;
 
 impl MoxiBoxApp {
     pub(super) fn render(&mut self, context: &egui::Context) {
         self.handle_events(context);
-        // The backend uses channels; repaint even while idle to receive task and connection updates.
-        context.request_repaint_after(Duration::from_millis(100));
+        // Worker events wake egui directly; idle windows do not need polling redraws.
         self.header(context);
         if self.show_workspace {
             self.sidebar(context);
         }
         self.conversation(context);
+        self.dialogs(context);
     }
 }
 
