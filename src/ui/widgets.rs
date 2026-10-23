@@ -1,4 +1,4 @@
-use eframe::egui::{self, Align, Color32, Layout, RichText, TextEdit};
+use eframe::egui::{self, Align, Color32, Layout, RichText, ScrollArea, TextEdit};
 
 use crate::domain::{ChatMessage, MessageRole, Task, WorkspaceEntry};
 
@@ -8,8 +8,7 @@ pub enum ProviderStatus {
     Offline,
     OnlineNoModel,
     Ready,
-    Working,
-    AwaitingApproval,
+    Available,
 }
 
 pub use super::theme::{ACCENT, SURFACE, SURFACE_RAISED, TEXT_MUTED};
@@ -58,6 +57,9 @@ pub fn model_picker(ui: &mut egui::Ui, selected: &mut Option<String>, models: &[
         .truncate()
         .width(150.0)
         .show_ui(ui, |ui| {
+            if let Some(model) = before.as_ref().filter(|model| !models.contains(model)) {
+                ui.selectable_value(selected, Some(model.clone()), model);
+            }
             for model in models {
                 ui.selectable_value(selected, Some(model.clone()), model);
             }
@@ -130,8 +132,7 @@ pub fn status_badge(ui: &mut egui::Ui, status: ProviderStatus) {
         ProviderStatus::Offline => (Color32::from_rgb(215, 139, 128), "Disconnected"),
         ProviderStatus::OnlineNoModel => (Color32::from_rgb(222, 185, 105), "Connected · no model"),
         ProviderStatus::Ready => (ACCENT, "Connected"),
-        ProviderStatus::Working => (ACCENT, "Working…"),
-        ProviderStatus::AwaitingApproval => (Color32::from_rgb(222, 185, 105), "Needs approval"),
+        ProviderStatus::Available => (TEXT_MUTED, "Available"),
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
@@ -163,8 +164,14 @@ pub fn mode_pill(ui: &mut egui::Ui, selected: &mut bool, value: bool, label: &st
 }
 
 pub fn message_bubble(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool) {
+    ui.push_id(message.id, |ui| {
+        message_bubble_inner(ui, message, streaming)
+    });
+}
+
+fn message_bubble_inner(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool) {
     let is_user = message.role == MessageRole::User;
-    let width = ui.available_width();
+    let width = (ui.available_width() * if is_user { 0.86 } else { 0.96 }).min(780.0);
     ui.with_layout(
         if is_user {
             Layout::right_to_left(Align::TOP)
@@ -172,26 +179,35 @@ pub fn message_bubble(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool)
             Layout::left_to_right(Align::TOP)
         },
         |ui| {
+            ui.set_max_width(width);
             egui::Frame::new()
                 .fill(if is_user {
-                    SURFACE_RAISED
+                    Color32::from_rgb(44, 57, 53)
                 } else {
-                    Color32::TRANSPARENT
+                    Color32::from_gray(42)
                 })
                 .corner_radius(18.0)
-                .inner_margin(egui::Margin::symmetric(14, 11))
+                .inner_margin(egui::Margin::symmetric(16, 14))
                 .show(ui, |ui| {
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        ui.set_max_width((width * 0.88 - 28.0).max(1.0));
+                        ui.set_max_width((width - 32.0).max(1.0));
                         ui.label(
                             RichText::new(message.role.label())
-                                .small()
-                                .color(TEXT_MUTED),
+                                .size(12.0)
+                                .strong()
+                                .color(if is_user {
+                                    Color32::from_rgb(160, 199, 183)
+                                } else {
+                                    TEXT_MUTED
+                                }),
                         );
+                        ui.add_space(4.0);
                         if message.content.is_empty() && streaming {
-                            ui.label(RichText::new("Thinking…").italics().color(TEXT_MUTED));
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Thinking…").color(TEXT_MUTED));
+                            });
                         } else {
-                            ui.add(egui::Label::new(&message.content).wrap());
+                            message_content(ui, &message.content);
                         }
                     });
                 });
@@ -199,8 +215,38 @@ pub fn message_bubble(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool)
     );
 }
 
+fn message_content(ui: &mut egui::Ui, content: &str) {
+    for (index, part) in content.split("```").enumerate() {
+        if index % 2 == 1 {
+            let (language, code) = part.split_once('\n').unwrap_or(("", part));
+            egui::Frame::new()
+                .fill(Color32::from_gray(25))
+                .corner_radius(8)
+                .inner_margin(10)
+                .show(ui, |ui| {
+                    if !language.trim().is_empty() {
+                        ui.label(RichText::new(language).small().color(TEXT_MUTED));
+                    }
+                    ScrollArea::horizontal()
+                        .id_salt(("code", index))
+                        .show(ui, |ui| {
+                            ui.monospace(code.trim_end());
+                        });
+                });
+        } else {
+            for paragraph in part.trim().split("\n\n").filter(|text| !text.is_empty()) {
+                ui.add(egui::Label::new(RichText::new(paragraph).size(16.0)).wrap());
+                ui.add_space(4.0);
+            }
+        }
+    }
+}
+
 pub struct ComposerResponse {
     pub send: bool,
+    pub stop: bool,
+    pub history: Option<bool>,
+    pub edited: bool,
 }
 
 pub fn composer(
@@ -208,12 +254,35 @@ pub fn composer(
     text: &mut String,
     agent_mode: bool,
     working: bool,
+    browsing_history: bool,
 ) -> ComposerResponse {
     let mut send = false;
+    let mut stop = false;
+    let mut history = None;
+    let mut edited = false;
     card()
         .corner_radius(24.0)
         .fill(SURFACE_RAISED)
         .show(ui, |ui| {
+            let input_id = egui::Id::new("composer_text");
+            if ui.memory(|memory| memory.has_focus(input_id))
+                && (!text.contains('\n') || browsing_history)
+            {
+                history = ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        Some(true)
+                    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                });
+            }
+            let shortcut = ui.memory(|memory| memory.has_focus(input_id))
+                && ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)
+                        || input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+                });
             let response = egui::ScrollArea::vertical()
                 .id_salt("composer_input")
                 .auto_shrink([false, false])
@@ -222,6 +291,7 @@ pub fn composer(
                     ui.add_sized(
                         [ui.available_width(), 44.0],
                         TextEdit::multiline(text)
+                            .id(input_id)
                             .desired_rows(2)
                             .frame(false)
                             .hint_text(if agent_mode {
@@ -232,11 +302,7 @@ pub fn composer(
                     )
                 })
                 .inner;
-            let shortcut = response.has_focus()
-                && ui.input(|input| {
-                    input.key_pressed(egui::Key::Enter)
-                        && (input.modifiers.ctrl || input.modifiers.command)
-                });
+            edited = response.changed();
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(if agent_mode {
@@ -248,20 +314,28 @@ pub fn composer(
                     .color(TEXT_MUTED),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    send = ui
-                        .add_enabled(
-                            !working && !text.trim().is_empty(),
-                            primary_button(if working { "Working…" } else { "Send" }),
-                        )
-                        .clicked()
-                        || shortcut;
-                    ui.label(
-                        RichText::new("Ctrl / Cmd + Enter")
-                            .small()
-                            .color(TEXT_MUTED),
-                    );
+                    if working {
+                        stop = ui.add(secondary_button("Stop")).clicked();
+                    } else {
+                        send = ui
+                            .add_enabled(!text.trim().is_empty(), primary_button("Send"))
+                            .clicked()
+                            || shortcut;
+                    }
+                    if ui.available_width() > 190.0 {
+                        ui.label(
+                            RichText::new("Up/Down history · Ctrl + Enter")
+                                .small()
+                                .color(TEXT_MUTED),
+                        );
+                    }
                 });
             });
         });
-    ComposerResponse { send }
+    ComposerResponse {
+        send,
+        stop,
+        history,
+        edited,
+    }
 }
