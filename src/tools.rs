@@ -16,6 +16,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
     vec![
+        definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("replace_all", "Replace every literal occurrence of old_text in one workspace file. Requires approval. Read the file first; no regex. Fails without changes when no match exists.", json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the entire workspace task list atomically, like TodoWrite. Include all items you want to keep. Create a short plan for multi-step work; update status as work progresses. One call can complete many tasks. Mark completed only after verifying success; failed or unfinished work stays pending or in_progress. Use [] only to intentionally clear the list. No approval needed; this changes task metadata only.", json!({"type":"object","additionalProperties":false,"properties":{"tasks":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
@@ -56,7 +57,7 @@ pub fn definitions() -> Vec<Value> {
 pub fn requires_approval(name: &str) -> bool {
     matches!(
         name,
-        "write_file" | "replace_all" | "edit_file" | "run_command" | "remember"
+        "delete_path" | "write_file" | "replace_all" | "edit_file" | "run_command" | "remember"
     )
 }
 
@@ -166,6 +167,15 @@ fn command_line(arguments: &Value) -> String {
 
 pub fn approval_summary(name: &str, arguments: &Value) -> String {
     match name {
+        "delete_path" => format!(
+            "Permanently delete {}{}?",
+            arguments["path"].as_str().unwrap_or("path"),
+            if arguments["recursive"] == true {
+                " and all its contents"
+            } else {
+                ""
+            }
+        ),
         "remember" => "Remember this project note?".to_owned(),
         "write_file" => format!(
             "Write {} ({} bytes)?",
@@ -231,6 +241,15 @@ pub fn execute(
             &root,
             required_string(arguments, "path")?,
             required_string(arguments, "content")?,
+        ),
+        "delete_path" => delete_path(
+            &root,
+            required_string(arguments, "path")?,
+            arguments
+                .get("recursive")
+                .map(|v| v.as_bool().ok_or("recursive must be a boolean"))
+                .transpose()?
+                .unwrap_or(false),
         ),
         "replace_all" => replace_all(
             &root,
@@ -493,6 +512,36 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         path.strip_prefix(root).unwrap_or(&path).display()
     ))
 }
+fn delete_path(root: &Path, path: &str, recursive: bool) -> Result<String, String> {
+    let target = safe_path(root, path, false)?;
+    if target == root {
+        return Err("Cannot delete the workspace root.".into());
+    }
+    // Reject symlink aliases rather than deleting their resolved targets.
+    let mut component = root.to_path_buf();
+    for part in Path::new(path).components() {
+        component.push(part);
+        if fs::symlink_metadata(&component)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Deletion through symlinks is not supported.".into());
+        }
+    }
+    let result = if target.is_dir() {
+        if recursive {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_dir(&target)
+        }
+    } else {
+        fs::remove_file(&target)
+    };
+    result.map_err(|e| format!("Could not delete {path}: {e}"))?;
+    Ok(format!("Deleted {path}."))
+}
+
 fn replace_all(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
     if old.is_empty() {
         return Err("old_text must not be empty.".into());
@@ -636,7 +685,11 @@ fn run_command(
         end -= 1;
     }
     text.truncate(end);
-    Ok(text)
+    if status.success() {
+        Ok(text)
+    } else {
+        Err(format!("Command failed: {text}"))
+    }
 }
 
 fn stop_command(child: &mut std::process::Child) {
@@ -951,5 +1004,50 @@ mod replacement_tests {
             "ship ship"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    #[test]
+    fn deletion_requires_explicit_recursion_and_preserves_root() {
+        let root = std::env::temp_dir().join(format!("moxi-delete-{}", std::process::id()));
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/file"), "keep").unwrap();
+        assert!(delete_path(&root, "nested", false).is_err());
+        assert!(root.join("nested/file").exists());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("nested"), root.join("alias")).unwrap();
+            assert!(delete_path(&root, "alias", true).is_err());
+            assert!(root.join("nested/file").exists());
+            fs::remove_file(root.join("alias")).unwrap();
+        }
+        assert!(delete_path(&root, ".", true).is_err());
+        assert!(delete_path(&root, "../outside", true).is_err());
+        delete_path(&root, "nested/file", false).unwrap();
+        fs::write(root.join("nested/another"), "x").unwrap();
+        delete_path(&root, "nested", true).unwrap();
+        assert!(root.exists());
+        fs::remove_dir(root).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod command_failure_tests {
+    use super::*;
+    #[test]
+    fn nonzero_exit_is_failure_with_diagnostics() {
+        let args = vec![json!("-c"), json!("printf failure >&2; exit 127")];
+        let result = run_command(
+            &std::env::temp_dir(),
+            "sh",
+            Some(&args),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("127"));
+        assert!(error.contains("failure"));
     }
 }
