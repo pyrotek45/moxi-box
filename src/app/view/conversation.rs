@@ -27,7 +27,8 @@ impl MoxiBoxApp {
                 else if self.run_pending { ui.label(RichText::new("Working…").small().color(TEXT_MUTED)); }
                 ui.add_space(8.0);
                 ScrollArea::vertical().id_salt(("conversation",self.conversation_id))
-                    .auto_shrink([false, false]).stick_to_bottom(self.preview.is_none())
+                    .auto_shrink([false, false]).min_scrolled_height(0.0)
+                    .max_height(ui.available_height().max(0.0)).stick_to_bottom(self.preview.is_none())
                     .show(ui, |ui| {
                         if self.agent_mode { ui.label(RichText::new("Writes and commands ask for your approval.").small().color(TEXT_MUTED)); }
                         if !self.summary.is_empty() {
@@ -43,9 +44,10 @@ impl MoxiBoxApp {
                             ScrollArea::horizontal().id_salt("file_content").show(ui, |ui| { ui.monospace(content); });
                         } else {
                             if self.messages.is_empty() {
-                                ui.add_space((ui.available_height() * 0.20).max(12.0));
+                                let roomy = ui.available_height() >= 120.0;
+                                if roomy { ui.add_space(ui.available_height() * 0.20); }
                                 ui.vertical_centered(|ui| {
-                                    ui.label(RichText::new("Your ideas, built locally.").size(28.0));
+                                    if roomy { ui.label(RichText::new("Your ideas, built locally.").size(28.0)); }
                                     ui.label(RichText::new("Chat with your local model, or use Agent mode to work on code.").color(TEXT_MUTED));
                                 });
                             }

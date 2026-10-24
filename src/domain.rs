@@ -132,10 +132,6 @@ pub enum AppCommand {
         base_url: String,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
-    ListFolders {
-        path: String,
-        request_id: u64,
-    },
     ResetWorkspace {
         path: String,
     },
@@ -179,10 +175,6 @@ pub enum AppEvent {
         result: Result<Vec<String>, String>,
     },
     WorkspaceOpened(Result<(String, Vec<WorkspaceEntry>), String>),
-    FoldersListed {
-        request_id: u64,
-        result: Result<(String, Vec<String>), String>,
-    },
     ConnectionChanged(bool),
     ConversationLoaded(ConversationState),
     ContextCompacted {

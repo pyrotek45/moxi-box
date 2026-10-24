@@ -7,7 +7,6 @@ impl MoxiBoxApp {
         };
         let mut accept = false;
         let mut cancel = false;
-        let mut navigate = None;
         let expected = std::path::Path::new(&self.settings.workspace_root)
             .file_name()
             .and_then(|name| name.to_str())
@@ -29,33 +28,17 @@ impl MoxiBoxApp {
                         widgets::text_field(ui,&mut self.workspace_name,"Workspace folder name");
                     }
                     WorkspaceDialog::Open | WorkspaceDialog::New => {
-                        ui.label(if dialog == WorkspaceDialog::New { "Choose the parent folder" } else { "Choose a folder" });
-                        widgets::text_field(ui,&mut self.workspace_path,"Folder path");
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(!self.folder_loading,widgets::secondary_button("Go")).clicked() { navigate = Some(self.workspace_path.clone()); }
-                            if ui.add_enabled(!self.folder_loading,widgets::secondary_button("Up")).clicked() {
-                                navigate = std::path::Path::new(&self.workspace_path).parent().map(|path| path.to_string_lossy().into_owned());
-                            }
-                        });
-                        if self.folder_loading { ui.label("Loading folders…"); }
-                        ScrollArea::vertical().id_salt("folder_list").max_height(140.0).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            if self.folder_entries.is_empty() && !self.folder_loading { ui.label(RichText::new("No subfolders").small().color(TEXT_MUTED)); }
-                            for path in &self.folder_entries {
-                                let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path);
-                                if ui.add(egui::Button::new(name).frame(false).truncate()).on_hover_text(path).clicked() { navigate = Some(path.clone()); }
-                            }
-                        });
-                        if dialog == WorkspaceDialog::New {
-                            ui.label("New folder name");
-                            widgets::text_field(ui,&mut self.workspace_name,"my-project");
-                        }
+                        ui.label("Create in:");
+                        ui.add(egui::Label::new(&self.workspace_path).wrap());
+                        ui.add_space(12.0);
+                        ui.label("New folder name");
+                        widgets::text_field(ui, &mut self.workspace_name, "my-project");
                     }
                 }
                 if let Some(error) = &self.workspace_error { ui.add(egui::Label::new(RichText::new(error).color(Color32::LIGHT_RED)).wrap()); }
             });
             ui.add_space(10.0);
-            ui.add_enabled_ui(!self.workspace_pending && !self.folder_loading, |ui| {
+            ui.add_enabled_ui(!self.workspace_pending, |ui| {
                 ui.horizontal(|ui| {
                     let allowed = match dialog { WorkspaceDialog::Reset => !expected.is_empty() && self.workspace_name == expected, WorkspaceDialog::New => !self.workspace_name.trim().is_empty(), _ => true };
                     accept = ui.add_enabled(allowed, widgets::primary_button(match dialog { WorkspaceDialog::New => "Create", WorkspaceDialog::Open => "Open folder", WorkspaceDialog::Remove => "Remove from list", WorkspaceDialog::Reset => "Archive and reset" })).clicked();
@@ -64,9 +47,6 @@ impl MoxiBoxApp {
             });
             if self.workspace_pending { ui.label("Opening workspace…"); }
         });
-        if let Some(path) = navigate {
-            self.browse_folders(path);
-        }
         if accept {
             match dialog {
                 WorkspaceDialog::Remove => self.remove_workspace(),

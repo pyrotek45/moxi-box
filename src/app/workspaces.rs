@@ -9,30 +9,66 @@ pub(super) enum WorkspaceDialog {
 }
 
 impl MoxiBoxApp {
-    pub(super) fn show_workspace_dialog(&mut self, dialog: WorkspaceDialog) {
-        self.workspace_dialog = Some(dialog);
+    pub(super) fn show_workspace_dialog(
+        &mut self,
+        dialog: WorkspaceDialog,
+        context: &egui::Context,
+    ) {
+        if self.run_pending || self.workspace_pending || self.folder_picker.is_some() {
+            return;
+        }
         self.workspace_error = None;
         self.workspace_name.clear();
-        let root = if self.settings.workspace_root.is_empty() {
-            std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            self.settings.workspace_root.clone()
-        };
-        if matches!(dialog, WorkspaceDialog::New | WorkspaceDialog::Open) {
-            self.browse_folders(root);
+        if matches!(dialog, WorkspaceDialog::Remove | WorkspaceDialog::Reset) {
+            self.workspace_dialog = Some(dialog);
+            return;
         }
-    }
-    pub(super) fn browse_folders(&mut self, path: String) {
-        self.folder_request += 1;
-        self.folder_loading = true;
-        self.workspace_error = None;
-        self.command(AppCommand::ListFolders {
-            path,
-            request_id: self.folder_request,
+        let root = if self.settings.workspace_root.is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            std::path::PathBuf::from(&self.settings.workspace_root)
+        };
+        let (sender, receiver) = mpsc::channel();
+        self.folder_picker = Some((dialog, receiver));
+        let context = context.clone();
+        std::thread::spawn(move || {
+            let selection = rfd::FileDialog::new()
+                .set_title(if dialog == WorkspaceDialog::New {
+                    "Choose parent folder for new workspace"
+                } else {
+                    "Open workspace"
+                })
+                .set_directory(root)
+                .pick_folder();
+            let _ = sender.send(selection);
+            context.request_repaint();
         });
+    }
+
+    pub(super) fn poll_folder_picker(&mut self) {
+        let Some((dialog, receiver)) = &self.folder_picker else {
+            return;
+        };
+        let dialog = *dialog;
+        let selection = match receiver.try_recv() {
+            Ok(selection) => selection,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.folder_picker = None;
+                self.notice = Some("The system folder chooser could not open. Check your desktop file-dialog service.".to_owned());
+                return;
+            }
+        };
+        self.folder_picker = None;
+        if let Some(path) = selection {
+            let path = path.to_string_lossy().into_owned();
+            if dialog == WorkspaceDialog::New {
+                self.workspace_path = path;
+                self.workspace_dialog = Some(WorkspaceDialog::New);
+            } else {
+                self.open_workspace(path, false);
+            }
+        }
     }
     pub(super) fn remember_workspace(&mut self) {
         let root = &self.settings.workspace_root;
