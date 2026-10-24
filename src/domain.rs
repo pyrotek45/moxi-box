@@ -228,6 +228,8 @@ pub enum AppEvent {
     ChatFinished {
         id: i64,
     },
+    /// The model is producing output the user cannot see yet.
+    RunProgress,
     ToolActivity(AgentActivity),
     ApprovalRequested {
         request_id: String,

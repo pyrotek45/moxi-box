@@ -53,6 +53,7 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             queued: Default::default(),
             tree_requested: std::time::Instant::now(),
             tree_pending: false,
+            activity_at: std::time::Instant::now(),
         },
         events_tx,
     );
@@ -390,4 +391,19 @@ fn turning_on_auto_approve_approves_the_waiting_request() {
         commands.try_recv(),
         Ok(AppCommand::ResolveApproval { request_id, approved: true }) if request_id == "call-1"
     ));
+}
+
+#[test]
+fn waiting_label_reports_silence_not_total_time() {
+    let (mut app, tx) = fixture();
+    assert_eq!(app.waiting_label("Thinking"), "Thinking");
+    app.activity_at = std::time::Instant::now() - std::time::Duration::from_secs(42);
+    assert_eq!(
+        app.waiting_label("Thinking"),
+        "Thinking · no output for 42s"
+    );
+    // Any streamed output, visible or not, resets the silence timer.
+    tx.send(AppEvent::RunProgress).unwrap();
+    app.handle_events(&egui::Context::default());
+    assert_eq!(app.waiting_label("Thinking"), "Thinking");
 }
