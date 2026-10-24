@@ -459,7 +459,8 @@ fn model(settings: &Settings) -> Result<&str, String> {
         .ok_or_else(|| "Select a model before sending a message.".to_owned())
 }
 fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 pub fn normalize_base_url(value: &str) -> Result<String, String> {
     let mut url = reqwest::Url::parse(value.trim())

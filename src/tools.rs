@@ -266,10 +266,18 @@ pub fn execute(
         "run_command" => run_command(
             &root,
             required_string(arguments, "program")?,
-            arguments["args"].as_array(),
+            command_arguments(arguments)?,
             cancelled,
         ),
         _ => Err(format!("Unknown tool: {name}")),
+    }
+}
+
+fn command_arguments(arguments: &Value) -> Result<Option<&Vec<Value>>, String> {
+    match arguments.get("args") {
+        None => Ok(None),
+        Some(Value::Array(args)) if args.iter().all(Value::is_string) => Ok(Some(args)),
+        _ => Err("args must be an array of strings, e.g. [\"test\"]. For shell syntax use program=sh and args=[\"-c\", \"command text\"]. No command was started.".into()),
     }
 }
 
@@ -501,6 +509,9 @@ fn search_file(root: &Path, path: &Path, query: &str, ignore_case: bool, found: 
     }
 }
 fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
+    if content.len() > MAX_FILE_BYTES as usize {
+        return Err("File exceeds the 256 KiB limit. No file was changed.".into());
+    }
     let path = safe_path(root, path, true)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -576,8 +587,11 @@ fn edit_file(root: &Path, path: &str, old: &str, new: &str) -> Result<String, St
         count => return Err(format!("old_text matches {count} places. Include more surrounding lines so it is unique.")),
     }
     let line = text[..text.find(&old).unwrap_or(0)].lines().count() + 1;
-    fs::write(safe_path(root, path, false)?, text.replacen(&old, &new, 1))
-        .map_err(|error| error.to_string())?;
+    let edited = text.replacen(&old, &new, 1);
+    if edited.len() > MAX_FILE_BYTES as usize {
+        return Err("Edited file exceeds the 256 KiB limit. No file was changed.".into());
+    }
+    fs::write(safe_path(root, path, false)?, edited).map_err(|error| error.to_string())?;
     Ok(format!(
         "Edited {path} at line {line}: replaced {} lines with {} lines.",
         old.lines().count(),
@@ -603,6 +617,7 @@ fn run_command(
     command
         .args(&args)
         .current_dir(root)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
@@ -1049,5 +1064,49 @@ mod command_failure_tests {
         let error = result.unwrap_err();
         assert!(error.contains("127"));
         assert!(error.contains("failure"));
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    #[test]
+    fn malformed_command_args_are_rejected_instead_of_dropped() {
+        for args in [json!("-c echo test"), json!(null), json!([1]), json!({})] {
+            assert!(command_arguments(&json!({"args":args})).is_err());
+        }
+        assert!(command_arguments(&json!({})).unwrap().is_none());
+        assert_eq!(
+            command_arguments(&json!({"args":["test"]}))
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn oversized_write_preserves_original_file() {
+        let root = std::env::temp_dir().join(format!("moxi-write-limit-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("file"), "original").unwrap();
+        assert!(write_file(&root, "file", &"x".repeat(MAX_FILE_BYTES as usize + 1)).is_err());
+        assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "original");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn commands_receive_eof_on_stdin() {
+        let args = vec![
+            json!("-c"),
+            json!("if read line; then exit 1; else printf eof; fi"),
+        ];
+        assert!(run_command(
+            &std::env::temp_dir(),
+            "sh",
+            Some(&args),
+            &std::sync::atomic::AtomicBool::new(false)
+        )
+        .unwrap()
+        .contains("eof"));
     }
 }
