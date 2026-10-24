@@ -26,11 +26,7 @@ pub(super) fn run_agent(
         Ok(history) => history,
         Err(error) => return fail_run(store, events, error),
     };
-    let prompt = if settings.web_access {
-        format!("{}\n\n{}", lm_studio::AGENT_PROMPT, lm_studio::WEB_PROMPT)
-    } else {
-        lm_studio::AGENT_PROMPT.to_owned()
-    };
+    let prompt = lm_studio::agent_prompt(settings.web_access);
     let mut definitions = tools::definitions();
     if settings.web_access {
         definitions.extend(crate::web::definitions());
