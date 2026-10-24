@@ -80,3 +80,7 @@ Chat bubbles render CommonMark formatting, including headings, emphasis, lists, 
 Use the top-right Settings gear for folder attachment, creation, detachment, reset, and workspace memory. The sidebar retains workspace navigation, files, and tasks.
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
+
+Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 500 tree entries and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
+
+File editing accepts the canonical path/old_text/new_text fields plus filePath/oldString/newString aliases. Conflicting aliases are rejected. Copied numbered-line prefixes are removed from old_text only after an exact match fails; the resulting match must still be unique.
