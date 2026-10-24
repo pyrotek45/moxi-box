@@ -26,9 +26,7 @@ fn fixture() -> (MoxiBoxApp, Sender<AppEvent>) {
             workspace_error: None,
             workspace_pending: false,
             workspace_name: String::new(),
-            folder_entries: Vec::new(),
-            folder_request: 0,
-            folder_loading: false,
+            folder_picker: None,
             history: PromptHistory::default(),
             approval: None,
             activity: vec![],
@@ -226,9 +224,9 @@ fn modal_actions_remain_inside_compact_windows() {
                 "Save"
             }
             1 => {
-                app.workspace_dialog = Some(WorkspaceDialog::Open);
+                app.workspace_dialog = Some(WorkspaceDialog::New);
                 app.workspace_path = "/tmp".into();
-                "Open folder"
+                "Create"
             }
             2 => {
                 app.workspace_dialog = Some(WorkspaceDialog::Reset);
@@ -274,4 +272,39 @@ fn modal_actions_remain_inside_compact_windows() {
         }
         assert!(found, "{expected} action was not rendered");
     }
+}
+
+#[test]
+fn native_picker_cancel_and_open() {
+    let (mut app, _) = fixture();
+    let (sender, commands) = mpsc::channel();
+    app.commands = sender;
+    app.settings.workspace_root = "/original".into();
+    let (sender, receiver) = mpsc::channel();
+    app.folder_picker = Some((WorkspaceDialog::Open, receiver));
+    sender.send(None).unwrap();
+    app.poll_folder_picker();
+    assert_eq!(app.settings.workspace_root, "/original");
+    assert!(app.folder_picker.is_none());
+    assert!(commands.try_recv().is_err());
+    let (sender, receiver) = mpsc::channel();
+    app.folder_picker = Some((WorkspaceDialog::Open, receiver));
+    sender.send(Some("/selected".into())).unwrap();
+    app.poll_folder_picker();
+    assert!(
+        matches!(commands.try_recv(), Ok(AppCommand::OpenWorkspace {path, create: false}) if path == "/selected")
+    );
+}
+#[test]
+fn native_new_parent_waits_for_name() {
+    let (mut app, _) = fixture();
+    let (sender, commands) = mpsc::channel();
+    app.commands = sender;
+    let (sender, receiver) = mpsc::channel();
+    app.folder_picker = Some((WorkspaceDialog::New, receiver));
+    sender.send(Some("/parent".into())).unwrap();
+    app.poll_folder_picker();
+    assert!(app.workspace_dialog == Some(WorkspaceDialog::New));
+    assert_eq!(app.workspace_path, "/parent");
+    assert!(commands.try_recv().is_err());
 }

@@ -1,6 +1,6 @@
 # Moxi Box
 
-A small native Rust + egui harness for local models: chat, workspace tools, explicit approvals, saved conversations, rolling summaries, and project memory. The interface uses custom widgets, a charcoal theme, and bundled Inter typography. No extra dependencies are required for the folder browser or agent features.
+A small native Rust + egui harness for local models: chat, workspace tools, explicit approvals, saved conversations, rolling summaries, and project memory. The interface uses custom widgets, a charcoal theme, and bundled Inter typography.
 
 ## Getting started
 
@@ -40,8 +40,9 @@ Long histories are compacted automatically before they reach the configured cont
 
 ## Workspace actions
 
-- **Open** shows a navigable folder browser. Click a folder to enter it, **Up** for its parent, or enter a path and **Go**. **Open folder** selects the current folder.
-- **New** uses the same browser to select a parent, then creates the single folder name you enter. Existing directories are never overwritten.
+- **Open** launches the native system folder chooser, with normal desktop navigation and locations. Cancel keeps the current workspace.
+- **New** uses the native chooser to select a parent, then asks for a new folder name. Existing directories are never overwritten.
+- Linux needs a running desktop portal and file chooser backend (for example `xdg-desktop-portal` and `xdg-desktop-portal-gtk`). Windows and macOS use native dialogs.
 - **Delete** removes the selected saved entry and keeps all its files and conversations.
 - **Reset** requires typing the folder name. It moves the project to a sibling `.backup-…` folder, recreates the original path empty, and starts a new chat. Existing conversations and memory remain available. Reset is disabled during an active run. Original files can be recovered from the displayed backup path.
 

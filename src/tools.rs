@@ -446,22 +446,6 @@ pub fn open_workspace(path: &str, create: bool) -> Result<(String, Vec<Workspace
     Ok((root, entries))
 }
 
-pub fn list_folders(path: &str) -> Result<(String, Vec<String>), String> {
-    let root = canonical_root(path)?;
-    if !root.is_dir() {
-        return Err("Choose a directory.".to_owned());
-    }
-    let mut folders = Vec::new();
-    for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if entry.path().is_dir() {
-            folders.push(entry.path().to_string_lossy().into_owned());
-        }
-    }
-    folders.sort_by_key(|path| path.to_lowercase());
-    Ok((root.to_string_lossy().into_owned(), folders))
-}
-
 pub fn reset_workspace(path: &str) -> Result<String, String> {
     let input = Path::new(path);
     if fs::symlink_metadata(input)
@@ -579,16 +563,12 @@ mod tests {
         assert!(result.contains('é'));
     }
     #[test]
-    fn workspace_browser_creation_and_reset_preserve_original_files() {
+    fn workspace_creation_and_reset_preserve_original_files() {
         let fixture = Fixture::new();
         let project = fixture.0.join("project");
         let (root, _) = open_workspace(project.to_str().unwrap(), true).unwrap();
         fs::write(project.join("important.txt"), "keep me").unwrap();
         assert!(open_workspace(project.to_str().unwrap(), true).is_err());
-        assert!(list_folders(fixture.0.to_str().unwrap())
-            .unwrap()
-            .1
-            .contains(&root));
         let backup = reset_workspace(&root).unwrap();
         assert_eq!(
             fs::read_to_string(Path::new(&backup).join("important.txt")).unwrap(),
