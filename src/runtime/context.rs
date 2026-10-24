@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::ChatMessage;
+use crate::domain::{ChatMessage, Task, TaskStatus};
 use serde_json::{json, Value};
 
 // Conservative byte-based estimate, not a tokenizer or a guarantee of a model's context size.
@@ -15,6 +15,8 @@ pub(super) fn prepare(
     cancelled: &AtomicBool,
 ) -> Result<Vec<ChatMessage>, String> {
     let state = store.conversation_state()?;
+    let tasks = store.tasks()?;
+    let fixed = state.memory.len() + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
     let (mut summary, through) = store.summary()?;
     let mut recent = state
         .messages
@@ -29,15 +31,13 @@ pub(super) fn prepare(
                 && message.role != MessageRole::System
         })
         .collect::<Vec<_>>();
-    while recent.iter().map(|m| m.content.len() + 80).sum::<usize>()
-        + summary.len()
-        + state.memory.len()
+    while recent.iter().map(|m| m.content.len() + 80).sum::<usize>() + summary.len() + fixed
         > budget(settings)
     {
         if recent.len() <= 2 {
             return Err("The latest messages exceed the context budget. Increase it in provider settings or start a new conversation with a shorter prompt.".to_owned());
         }
-        let room = budget(settings).saturating_sub(summary.len() + state.memory.len() + 2000);
+        let room = budget(settings).saturating_sub(summary.len() + fixed + 2000);
         let count = compaction_prefix(&recent, room)?;
         let transcript = recent[..count]
             .iter()
@@ -65,7 +65,7 @@ pub(super) fn prepare(
             },
         );
     }
-    let mut history = context_notes(&state.memory, &summary);
+    let mut history = context_notes(&state.memory, &tasks, &summary);
     history.extend(recent);
     Ok(history)
 }
@@ -87,8 +87,9 @@ fn note_tools_used(message: &mut ChatMessage, activity: &[crate::domain::AgentAc
     }
 }
 
-/// Memory and summary are context for the model, folded into its single system message.
-fn context_notes(memory: &str, summary: &str) -> Vec<ChatMessage> {
+/// Memory, the task checklist, and the summary are context for the model, folded into
+/// its single system message.
+fn context_notes(memory: &str, tasks: &[Task], summary: &str) -> Vec<ChatMessage> {
     let note = |content: String| ChatMessage {
         id: 0,
         role: MessageRole::System,
@@ -97,6 +98,23 @@ fn context_notes(memory: &str, summary: &str) -> Vec<ChatMessage> {
     let mut notes = Vec::new();
     if !memory.is_empty() {
         notes.push(note(format!("User-maintained workspace memory:\n{memory}")));
+    }
+    if !tasks.is_empty() {
+        let list = tasks
+            .iter()
+            .map(|task| {
+                let mark = match task.status {
+                    TaskStatus::Completed => "[x]",
+                    TaskStatus::InProgress => "[~]",
+                    TaskStatus::Pending => "[ ]",
+                };
+                format!("{mark} {}", task.title)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        notes.push(note(format!(
+            "Your task list (working checklist; keep it current with update_tasks):\n{list}"
+        )));
     }
     if !summary.is_empty() {
         notes.push(note(format!(
@@ -182,13 +200,14 @@ pub(super) fn compact_agent(
     if !chunk.is_empty() {
         summary = runtime.block_on(lm_studio::summarize(settings, &summary, &chunk, cancelled))?;
     }
-    let mut history = context_notes(&store.memory()?, &summary);
+    let mut history = context_notes(&store.memory()?, &store.tasks()?, &summary);
     history.push(ChatMessage {
         id: 0,
         role: MessageRole::User,
         content: request,
     });
-    let mut compact = lm_studio::provider_messages(lm_studio::AGENT_PROMPT, &history);
+    let mut compact =
+        lm_studio::provider_messages(&lm_studio::agent_prompt(settings.web_access), &history);
     compact.extend_from_slice(&messages[split..]);
     if serde_json::to_vec(&compact)
         .map_err(|e| e.to_string())?
@@ -299,8 +318,15 @@ mod tests {
         let settings = Settings {
             lm_studio_url: format!("http://{address}/v1"),
             selected_model: Some("mock".into()),
+            web_access: true,
             ..Settings::default()
         };
+        store
+            .replace_tasks(&json!({"tasks":[
+                {"title":"Read the parser","status":"completed"},
+                {"title":"Fix the bug","status":"in_progress"}
+            ]}))
+            .unwrap();
         let mut messages = vec![json!({"role":"system","content":"agent instructions"})];
         for index in 0..4 {
             messages.push(json!({"role":if index%2==0 {"user"} else {"assistant"},"content":"x".repeat(3000)}));
@@ -331,6 +357,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("earlier decisions"));
+        // The rebuilt instructions keep web research and the working checklist.
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.contains(lm_studio::WEB_PROMPT));
+        assert!(system.contains("[x] Read the parser\n[~] Fix the bug"));
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[messages.len() - 3], call);
