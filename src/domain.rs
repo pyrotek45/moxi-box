@@ -75,7 +75,32 @@ pub struct ChatMessage {
 pub struct Task {
     pub id: i64,
     pub title: String,
-    pub complete: bool,
+    pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDraft {
+    pub title: String,
+    pub status: TaskStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +227,7 @@ pub enum AppEvent {
         request_id: String,
         summary: String,
     },
+    TasksUpdated(Vec<Task>),
     TaskAdded(Task),
     TaskChanged {
         id: i64,

@@ -173,7 +173,18 @@ pub(super) fn run_agent(
                 step.title = format!("Running {}", call.name);
                 send(events, AppEvent::ToolActivity(step.clone()));
             }
-            let result = if call.name == "remember" {
+            let result = if matches!(call.name.as_str(), "list_tasks" | "update_tasks") {
+                let tasks = if call.name == "update_tasks" {
+                    store.replace_tasks(&call.arguments)
+                } else {
+                    store.tasks()
+                };
+                tasks.and_then(|tasks| {
+                    let result = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
+                    send(events, AppEvent::TasksUpdated(tasks));
+                    Ok(result)
+                })
+            } else if call.name == "remember" {
                 call.arguments["note"]
                     .as_str()
                     .ok_or_else(|| "Missing memory note.".to_owned())
@@ -196,7 +207,9 @@ pub(super) fn run_agent(
                 Err(error) => (format!("Tool error: {error}"), false),
             };
             let text = format!("Arguments:\n{}\n\nResult:\n{}", call.arguments, observation);
-            let visible = if observation.len() > 4000 {
+            let visible = if observation.len() > 4000
+                && !matches!(call.name.as_str(), "list_tasks" | "update_tasks")
+            {
                 format!("{}\n[Output truncated for context. Read a smaller range or use a narrower query.]",observation.chars().take(3500).collect::<String>())
             } else {
                 observation.clone()
