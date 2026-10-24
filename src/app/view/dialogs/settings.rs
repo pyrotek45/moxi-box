@@ -17,14 +17,15 @@ impl MoxiBoxApp {
                     egui::CollapsingHeader::new("Workspace").default_open(true).show(ui, |ui| {
                     ui.add(egui::Label::new(if self.settings.workspace_root.is_empty() { "No folder attached" } else { &self.settings.workspace_root }).wrap());
                     ui.add_enabled_ui(self.idle(), |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button("Attach / change").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::Attach, context); close = true; }
-                            if ui.button("New folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::NewFolderParent, context); close = true; }
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            if settings_action(ui, "Attach / change").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::Attach, context); close = true; }
+                            if settings_action(ui, "New folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::NewFolderParent, context); close = true; }
                             if !self.settings.workspace_root.is_empty() {
-                                if ui.button("Detach").clicked() { self.attach_folder(String::new(), false); }
-                                if ui.button("Reset folder").clicked() { self.workspace_name.clear(); self.workspace_error = None; self.workspace_dialog = Some(crate::app::workspaces::WorkspaceDialog::Reset); close = true; }
+                                if settings_action(ui, "Detach").clicked() { self.attach_folder(String::new(), false); }
+                                if settings_action(ui, "Reset folder").clicked() { self.workspace_name.clear(); self.workspace_error = None; self.workspace_dialog = Some(crate::app::workspaces::WorkspaceDialog::Reset); close = true; }
                             }
-                            if ui.button("Workspace memory").clicked() { self.memory_draft = Some(self.memory.clone()); close = true; }
+                            if settings_action(ui, "Workspace memory").clicked() { self.memory_draft = Some(self.memory.clone()); close = true; }
                         });
                     });
                     ui.add_space(12.0);
@@ -44,7 +45,7 @@ impl MoxiBoxApp {
                     });
                     egui::CollapsingHeader::new("Model connection").default_open(false).show(ui, |ui| {
                     ui.add(egui::Label::new(format!("{} · {}", self.settings.provider_name, self.settings.lm_studio_url)).truncate());
-                    open_provider = ui.add_enabled(!self.run_pending, widgets::secondary_button("Provider and context budget…")).clicked();
+                    open_provider = ui.add_enabled_ui(!self.run_pending, |ui| settings_action(ui, "Provider and context budget")).inner.clicked();
                     ui.add_space(12.0);
                     });
                     egui::CollapsingHeader::new("Tool reference").default_open(false).show(ui, |ui| {
@@ -80,4 +81,13 @@ impl MoxiBoxApp {
             self.show_settings = false;
         }
     }
+}
+
+fn settings_action(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 24.0),
+        Layout::left_to_right(Align::Center),
+        |ui| ui.selectable_label(false, RichText::new(label).size(14.0)),
+    )
+    .inner
 }
