@@ -611,7 +611,7 @@ pub fn working_indicator(ui: &mut egui::Ui, label: &str) {
                 ACCENT.gamma_multiply(0.35 + phase * 0.65),
             );
         }
-        ui.label(RichText::new(label).color(TEXT_MUTED));
+        ui.add(egui::Label::new(RichText::new(label).color(TEXT_MUTED)).truncate());
     });
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(50));
