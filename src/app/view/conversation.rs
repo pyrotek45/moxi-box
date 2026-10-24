@@ -16,7 +16,13 @@ impl MoxiBoxApp {
                         ui.vertical_centered(|ui| { ui.label(RichText::new("Local models. Your workspace. You're in control.").small().color(TEXT_MUTED)); });
                     });
                 ui.horizontal_wrapped(|ui| {
-                    ui.heading(if self.preview.is_some() { "File preview" } else { "Conversation" });
+                    let title = self.workspaces.iter().find(|workspace| Some(workspace.id) == self.workspace_id).map_or("Moxi", |workspace| workspace.name.as_str());
+// Leave room for the mode buttons beside a long workspace name.
+                    let room = (ui.available_width() - 190.0).max(80.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(room);
+                        ui.add(egui::Label::new(RichText::new(if self.preview.is_some() { "File preview" } else { title }).heading()).truncate()).on_hover_text(title);
+                    });
                     ui.add_enabled_ui(!self.run_pending, |ui| {
                         widgets::mode_pill(ui, &mut self.agent_mode, false, "Chat");
                         widgets::mode_pill(ui, &mut self.agent_mode, true, "Agent");
@@ -38,7 +44,7 @@ impl MoxiBoxApp {
                     ui.separator();
                     if close { self.preview = None; }
                 }
-                ScrollArea::vertical().id_salt(("conversation",self.conversation_id, self.preview.as_ref().map(|(path, _)| path.clone())))
+                ScrollArea::vertical().id_salt(("conversation",self.workspace_id, self.preview.as_ref().map(|(path, _)| path.clone())))
                     .auto_shrink([false, false]).min_scrolled_height(0.0)
                     .max_height(ui.available_height().max(0.0)).stick_to_bottom(self.preview.is_none())
                     .show(ui, |ui| {

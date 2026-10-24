@@ -1,3 +1,4 @@
+use super::workspaces::FolderPick;
 use super::*;
 
 fn fixture() -> (MoxiBoxApp, Sender<AppEvent>) {
@@ -35,9 +36,9 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             activity: vec![],
-            conversations: vec![],
-            conversation_id: None,
-            conversation_pending: false,
+            workspaces: vec![],
+            workspace_id: None,
+            switching: false,
             summary: String::new(),
             compacted_through: 0,
             show_full_history: false,
@@ -131,13 +132,32 @@ fn provider_save_validates_and_preserves_exact_model_id() {
 }
 
 #[test]
-fn removing_a_workspace_only_updates_saved_state() {
-    let (mut app, _) = fixture();
+fn switching_workspaces_follows_the_loaded_folder() {
+    let ((mut app, tx), commands) = fixture_with_commands();
     app.settings.workspace_root = "/tmp/first".into();
-    app.settings.workspaces = vec!["/tmp/first".into(), "/tmp/second".into()];
-    app.remove_workspace();
+    app.workspace_id = Some(1);
+    app.select_workspace(2);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::SelectWorkspace(2))
+    ));
+    tx.send(AppEvent::ConversationLoaded(
+        crate::domain::ConversationState {
+            current: 2,
+            folder: String::new(),
+            workspaces: vec![],
+            messages: vec![],
+            summary: String::new(),
+            compacted_through: 0,
+            memory: String::new(),
+            activity: vec![],
+        },
+    ))
+    .unwrap();
+    app.handle_events(&egui::Context::default());
+    assert!(!app.switching);
+    assert_eq!(app.workspace_id, Some(2));
     assert!(app.settings.workspace_root.is_empty());
-    assert_eq!(app.settings.workspaces, vec!["/tmp/second"]);
     assert!(app.workspace_entries.is_empty());
 }
 
@@ -197,7 +217,7 @@ fn ctrl_enter_sends_before_the_editor_consumes_enter() {
     app.commands = tx;
     app.connection.connected = true;
     app.settings.selected_model = Some("model".into());
-    app.conversation_id = Some(1);
+    app.workspace_id = Some(1);
     app.composer = "a real keyboard shortcut".into();
     let context = egui::Context::default();
     theme::install_theme(&context);
@@ -235,9 +255,9 @@ fn modal_actions_remain_inside_compact_windows() {
                 "Save"
             }
             1 => {
-                app.workspace_dialog = Some(WorkspaceDialog::New);
+                app.workspace_dialog = Some(WorkspaceDialog::NewFolder);
                 app.workspace_path = "/tmp".into();
-                "Create"
+                "Create and attach"
             }
             2 => {
                 app.workspace_dialog = Some(WorkspaceDialog::Reset);
@@ -292,18 +312,18 @@ fn native_picker_cancel_and_open() {
     app.commands = sender;
     app.settings.workspace_root = "/original".into();
     let (sender, receiver) = mpsc::channel();
-    app.folder_picker = Some((WorkspaceDialog::Open, receiver));
+    app.folder_picker = Some((FolderPick::Attach, receiver));
     sender.send(None).unwrap();
     app.poll_folder_picker();
     assert_eq!(app.settings.workspace_root, "/original");
     assert!(app.folder_picker.is_none());
     assert!(commands.try_recv().is_err());
     let (sender, receiver) = mpsc::channel();
-    app.folder_picker = Some((WorkspaceDialog::Open, receiver));
+    app.folder_picker = Some((FolderPick::Attach, receiver));
     sender.send(Some("/selected".into())).unwrap();
     app.poll_folder_picker();
     assert!(
-        matches!(commands.try_recv(), Ok(AppCommand::OpenWorkspace {path, create: false}) if path == "/selected")
+        matches!(commands.try_recv(), Ok(AppCommand::AttachFolder {path, create: false}) if path == "/selected")
     );
 }
 #[test]
@@ -312,10 +332,10 @@ fn native_new_parent_waits_for_name() {
     let (sender, commands) = mpsc::channel();
     app.commands = sender;
     let (sender, receiver) = mpsc::channel();
-    app.folder_picker = Some((WorkspaceDialog::New, receiver));
+    app.folder_picker = Some((FolderPick::NewFolderParent, receiver));
     sender.send(Some("/parent".into())).unwrap();
     app.poll_folder_picker();
-    assert!(app.workspace_dialog == Some(WorkspaceDialog::New));
+    assert!(app.workspace_dialog == Some(WorkspaceDialog::NewFolder));
     assert_eq!(app.workspace_path, "/parent");
     assert!(commands.try_recv().is_err());
 }
@@ -339,7 +359,7 @@ fn a_lost_worker_unlocks_the_ui_with_a_notice() {
 fn messages_sent_during_a_run_are_queued_and_share_its_stop_token() {
     let ((mut app, tx), commands) = fixture_with_commands();
     app.settings.selected_model = Some("model".into());
-    app.conversation_id = Some(1);
+    app.workspace_id = Some(1);
     app.connection.connected = true;
     app.composer = "first".into();
     app.send_message();

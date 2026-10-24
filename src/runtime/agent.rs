@@ -267,11 +267,13 @@ impl Tool<'_> {
                     .filter(|note| !note.is_empty() && note.len() <= 1000)
                     .ok_or("Use a nonempty memory note under 1,000 bytes.")?;
                 let memory = format!("{}\n- {note}", self.store.memory()?);
-                self.store
-                    .save_memory(&self.settings.workspace_root, memory.trim())?;
+                self.store.save_memory(memory.trim())?;
                 Ok("Project note saved for future conversations in this workspace.".to_owned())
             }
             name => {
+                if self.settings.workspace_root.is_empty() {
+                    return Err("No folder is attached to this workspace. Ask the user to attach one in the sidebar.".to_owned());
+                }
                 let result = tools::execute(self.settings, name, &call.arguments, self.cancelled);
                 if tools::requires_approval(name) {
                     // Writes and commands can change the tree shown in the sidebar.
