@@ -47,16 +47,30 @@ pub(super) fn run_agent(
         ) {
             return fail_run(store, events, error);
         }
+        reply.begin_turn();
+        let mut progress_at = std::time::Instant::now();
         let response = match runtime.block_on(lm_studio::agent_turn(
             &settings,
             &messages,
             definitions.clone(),
             cancelled,
+            |delta| match delta {
+                Some(text) => reply.stream(store, events, text),
+                // Invisible output still proves the model is working, not stuck.
+                None if progress_at.elapsed() >= std::time::Duration::from_millis(250) => {
+                    progress_at = std::time::Instant::now();
+                    send(events, AppEvent::RunProgress);
+                }
+                None => {}
+            },
         )) {
             Ok(response) => response,
-            Err(error) => return provider_failed(store, events, cancelled, error),
+            Err(error) => {
+                let _ = reply.save(store);
+                return provider_failed(store, events, cancelled, error);
+            }
         };
-        if let Err(error) = reply.push(store, events, &response.content) {
+        if let Err(error) = reply.save(store) {
             return fail_run(store, events, error);
         }
         if response.tool_calls.is_empty() {
@@ -126,10 +140,13 @@ fn take_steering(commands: &Receiver<AppCommand>, deferred: &mut VecDeque<AppCom
     steering.join("\n\n")
 }
 
-/// The visible assistant reply, saved after every model turn.
+/// The visible assistant reply, streamed as it arrives and checkpointed to storage.
 struct Reply {
     id: i64,
     text: String,
+    /// No text has arrived yet in the current model turn.
+    fresh_turn: bool,
+    saved_at: std::time::Instant,
 }
 
 impl Reply {
@@ -137,7 +154,44 @@ impl Reply {
         Self {
             id,
             text: String::new(),
+            fresh_turn: true,
+            saved_at: std::time::Instant::now(),
         }
+    }
+
+    fn begin_turn(&mut self) {
+        self.fresh_turn = true;
+    }
+
+    /// Append streamed text; turns are separated by a blank line.
+    fn stream(&mut self, store: &Store, events: &EventSender, text: &str) {
+        let mut delta = text.to_owned();
+        if self.fresh_turn {
+            delta = delta.trim_start().to_owned();
+            if delta.is_empty() {
+                return;
+            }
+            if !self.text.is_empty() {
+                delta.insert_str(0, "\n\n");
+            }
+            self.fresh_turn = false;
+        }
+        self.text.push_str(&delta);
+        send(
+            events,
+            AppEvent::ChatDelta {
+                id: self.id,
+                text: delta,
+            },
+        );
+        if self.saved_at.elapsed() >= std::time::Duration::from_millis(250) {
+            let _ = self.save(store);
+        }
+    }
+
+    fn save(&mut self, store: &Store) -> Result<(), String> {
+        self.saved_at = std::time::Instant::now();
+        store.replace_message_content(self.id, &self.text)
     }
 
     fn push(&mut self, store: &Store, events: &EventSender, content: &str) -> Result<(), String> {

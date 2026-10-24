@@ -85,6 +85,8 @@ pub struct MoxiBoxApp {
     /// When the file tree was last requested; it is re-scanned periodically to follow outside changes.
     tree_requested: std::time::Instant,
     tree_pending: bool,
+    /// Last sign of progress in the current run, for the waiting timer.
+    activity_at: std::time::Instant,
 }
 
 impl MoxiBoxApp {
@@ -141,6 +143,7 @@ impl MoxiBoxApp {
             queued: Default::default(),
             tree_requested: std::time::Instant::now(),
             tree_pending: false,
+            activity_at: std::time::Instant::now(),
         };
         app.command(AppCommand::Load);
         app
@@ -207,8 +210,10 @@ impl MoxiBoxApp {
                     });
                     self.streaming_id = Some(id);
                     self.run_pending = true;
+                    self.activity_at = std::time::Instant::now();
                 }
                 AppEvent::ChatDelta { id, text } => {
+                    self.activity_at = std::time::Instant::now();
                     if let Some(message) = self.messages.iter_mut().find(|message| message.id == id)
                     {
                         message.content.push_str(&text);
@@ -224,7 +229,9 @@ impl MoxiBoxApp {
                         self.command(AppCommand::SelectWorkspace(id));
                     }
                 }
+                AppEvent::RunProgress => self.activity_at = std::time::Instant::now(),
                 AppEvent::ToolActivity(activity) => {
+                    self.activity_at = std::time::Instant::now();
                     if let Some(old) = self.activity.iter_mut().find(|old| {
                         old.message_id == activity.message_id && old.call_id == activity.call_id
                     }) {
@@ -353,6 +360,14 @@ impl MoxiBoxApp {
             });
         }
         context.request_repaint_after(INTERVAL);
+    }
+
+    /// Counts seconds since the model last sent anything, so slow is distinguishable from stuck.
+    fn waiting_label(&self, base: &str) -> String {
+        match self.activity_at.elapsed().as_secs() {
+            seconds if seconds >= 5 => format!("{base} · no output for {seconds}s"),
+            _ => base.to_owned(),
+        }
     }
 
     fn stop(&mut self) {
