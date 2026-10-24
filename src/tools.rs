@@ -16,6 +16,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
     vec![
+        definition("replace_all", "Replace every literal occurrence of old_text in one workspace file. Requires approval. Read the file first; no regex. Fails without changes when no match exists.", json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the entire workspace task list atomically, like TodoWrite. Include all items you want to keep. Create a short plan for multi-step work; update status as work progresses. One call can complete many tasks. Mark completed only after verifying success; failed or unfinished work stays pending or in_progress. Use [] only to intentionally clear the list. No approval needed; this changes task metadata only.", json!({"type":"object","additionalProperties":false,"properties":{"tasks":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
         definition("remember", "Save a concise durable project fact to workspace memory. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"}},"required":["note"]})),
@@ -55,7 +56,7 @@ pub fn definitions() -> Vec<Value> {
 pub fn requires_approval(name: &str) -> bool {
     matches!(
         name,
-        "write_file" | "edit_file" | "run_command" | "remember"
+        "write_file" | "replace_all" | "edit_file" | "run_command" | "remember"
     )
 }
 
@@ -230,6 +231,12 @@ pub fn execute(
             &root,
             required_string(arguments, "path")?,
             required_string(arguments, "content")?,
+        ),
+        "replace_all" => replace_all(
+            &root,
+            required_string(arguments, "path")?,
+            required_string(arguments, "old_text")?,
+            required_string(arguments, "new_text")?,
         ),
         "edit_file" => edit_file(
             &root,
@@ -486,6 +493,23 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         path.strip_prefix(root).unwrap_or(&path).display()
     ))
 }
+fn replace_all(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
+    if old.is_empty() {
+        return Err("old_text must not be empty.".into());
+    }
+    let text = read_file(root, path)?;
+    let count = text.matches(old).count();
+    if count == 0 {
+        return Err("old_text was not found. Read the file and copy the exact text.".into());
+    }
+    let replaced = text.replace(old, new);
+    if replaced.len() > MAX_FILE_BYTES as usize {
+        return Err("Replacement exceeds the file size limit.".into());
+    }
+    fs::write(safe_path(root, path, false)?, replaced).map_err(|e| e.to_string())?;
+    Ok(format!("Replaced {count} occurrences in {path}."))
+}
+
 fn edit_file(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
     if old.is_empty() {
         return Err("old_text must not be empty. Use write_file to create a file.".to_owned());
@@ -906,5 +930,26 @@ mod tests {
         );
         trigger.join().unwrap();
         assert!(result.unwrap_err().contains("stopped by user"));
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+    #[test]
+    fn replaces_all_and_preserves_file_on_missing_match() {
+        let root = std::env::temp_dir().join(format!("moxi-replace-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("test.txt"), "boat boat").unwrap();
+        assert!(replace_all(&root, "test.txt", "boat", "ship")
+            .unwrap()
+            .contains("2 occurrences"));
+        assert!(replace_all(&root, "test.txt", "missing", "x").is_err());
+        assert!(replace_all(&root, "test.txt", "", "x").is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("test.txt")).unwrap(),
+            "ship ship"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
