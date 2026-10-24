@@ -8,8 +8,8 @@ use eframe::egui;
 
 use crate::{
     domain::{
-        AgentActivity, AppCommand, AppEvent, ChatMessage, Conversation, MessageRole, Settings,
-        Task, WorkspaceEntry, APPLICATION_NAME, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
+        AgentActivity, AppCommand, AppEvent, ChatMessage, MessageRole, Settings, Task, Workspace,
+        WorkspaceEntry, APPLICATION_NAME, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
     },
     runtime,
     ui::{theme, widgets::ProviderStatus},
@@ -59,15 +59,16 @@ pub struct MoxiBoxApp {
     workspace_error: Option<String>,
     workspace_pending: bool,
     workspace_name: String,
-    folder_picker: Option<(WorkspaceDialog, Receiver<Option<std::path::PathBuf>>)>,
+    folder_picker: Option<(workspaces::FolderPick, Receiver<Option<std::path::PathBuf>>)>,
     history: PromptHistory,
     /// (request id, summary, preview) of the tool call awaiting approval.
     approval: Option<(String, String, String)>,
     auto_approve: Arc<AtomicBool>,
     activity: Vec<AgentActivity>,
-    conversations: Vec<Conversation>,
-    conversation_id: Option<i64>,
-    conversation_pending: bool,
+    workspaces: Vec<Workspace>,
+    workspace_id: Option<i64>,
+    /// A workspace switch, creation, or deletion is in flight.
+    switching: bool,
     summary: String,
     compacted_through: i64,
     show_full_history: bool,
@@ -123,9 +124,9 @@ impl MoxiBoxApp {
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             activity: Vec::new(),
-            conversations: Vec::new(),
-            conversation_id: None,
-            conversation_pending: false,
+            workspaces: Vec::new(),
+            workspace_id: None,
+            switching: false,
             summary: String::new(),
             compacted_through: 0,
             show_full_history: false,
@@ -175,13 +176,7 @@ impl MoxiBoxApp {
                     self.tasks = tasks;
                     self.messages = messages;
                     self.history = PromptHistory::from_messages(&self.messages);
-                    self.remember_workspace();
                     self.refresh_models(false);
-                    if !self.settings.workspace_root.is_empty() {
-                        self.command(AppCommand::BrowseWorkspace {
-                            root: self.settings.workspace_root.clone(),
-                        });
-                    }
                 }
                 AppEvent::ModelsLoaded { request_id, result } => {
                     self.models_loaded(request_id, result)
@@ -225,11 +220,8 @@ impl MoxiBoxApp {
                     }
                     self.run_pending = false;
                     // Refresh titles and the saved summary after each completed turn.
-                    if let Some(id) = self.conversation_id {
-                        self.command(AppCommand::SelectConversation {
-                            workspace: self.settings.workspace_root.clone(),
-                            id,
-                        });
+                    if let Some(id) = self.workspace_id {
+                        self.command(AppCommand::SelectWorkspace(id));
                     }
                 }
                 AppEvent::ToolActivity(activity) => {
@@ -248,20 +240,29 @@ impl MoxiBoxApp {
                         Some("Earlier turns summarized. Full history remains saved.".to_owned());
                 }
                 AppEvent::ConversationLoaded(state) => {
-                    self.conversation_id = Some(state.current);
-                    self.conversations = state.conversations;
+                    if self.settings.workspace_root != state.folder {
+                        self.settings.workspace_root = state.folder;
+                        self.workspace_entries.clear();
+                        self.expanded_folders.clear();
+                        self.preview = None;
+                        self.tree_pending = false;
+                        self.tree_requested =
+                            std::time::Instant::now() - std::time::Duration::from_secs(10);
+                    }
+                    self.workspace_id = Some(state.current);
+                    self.workspaces = state.workspaces;
                     self.messages = state.messages;
                     self.history = PromptHistory::from_messages(&self.messages);
                     self.summary = state.summary;
                     self.compacted_through = state.compacted_through;
                     self.memory = state.memory;
                     self.activity = state.activity;
-                    if self.conversation_pending {
+                    if self.switching {
                         self.notice = None;
                         self.show_full_history = false;
                         self.composer.clear();
                     }
-                    self.conversation_pending = false;
+                    self.switching = false;
                 }
                 AppEvent::ApprovalRequested {
                     request_id,
@@ -284,7 +285,7 @@ impl MoxiBoxApp {
                 }
                 AppEvent::Notice(message) => self.notice = Some(message),
                 AppEvent::Error(message) => {
-                    self.conversation_pending = false;
+                    self.switching = false;
                     self.notice = Some(message);
                 }
                 AppEvent::RunFailed(message) => {
@@ -303,11 +304,11 @@ impl MoxiBoxApp {
     }
 
     fn send_message(&mut self) {
-        if self.conversation_pending || self.workspace_pending || self.composer.trim().is_empty() {
+        if self.switching || self.workspace_pending || self.composer.trim().is_empty() {
             return;
         }
-        if self.settings.workspace_root.is_empty() || self.conversation_id.is_none() {
-            self.notice = Some("Open a workspace before starting a conversation.".to_owned());
+        if self.workspace_id.is_none() {
+            self.notice = Some("Create a workspace first.".to_owned());
             return;
         }
         if !self.connection.connected {

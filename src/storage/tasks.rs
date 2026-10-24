@@ -27,7 +27,7 @@ impl Store {
         self.connection
             .prepare("SELECT id, title, status FROM tasks WHERE workspace=?1 ORDER BY id")
             .map_err(|e| e.to_string())?
-            .query_map([self.workspace.borrow().as_str()], |row| {
+            .query_map([self.scope()], |row| {
                 let status: String = row.get(2)?;
                 Ok(Task {
                     id: row.get(0)?,
@@ -52,7 +52,7 @@ impl Store {
         self.connection
             .execute(
                 "INSERT INTO tasks(title, workspace, status) VALUES(?1, ?2, 'pending')",
-                params![title.trim(), self.workspace.borrow().as_str()],
+                params![title.trim(), self.scope()],
             )
             .map_err(|e| e.to_string())?;
         Ok(Task {
@@ -68,7 +68,7 @@ impl Store {
             .connection
             .execute(
                 "UPDATE tasks SET status=?1, complete=?2 WHERE id=?3 AND workspace=?4",
-                params![status, complete, id, self.workspace.borrow().as_str()],
+                params![status, complete, id, self.scope()],
             )
             .map_err(|e| e.to_string())?;
         if changed == 0 {
@@ -95,7 +95,7 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
-        let workspace = self.workspace.borrow();
+        let workspace = self.scope();
         transaction
             .execute("DELETE FROM tasks WHERE workspace=?1", [workspace.as_str()])
             .map_err(|e| e.to_string())?;
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn batches_complete_many_tasks_and_invalid_batches_preserve_plan() {
         let store = Store::in_memory();
-        store.select_workspace("/project-a").unwrap();
+        let project_a = store.current.get();
         store
             .replace_tasks(&json!({"tasks":[
                 {"title":"Inspect code", "status":"completed"},
@@ -165,17 +165,21 @@ mod tests {
                 .iter()
                 .all(|task| task.status == TaskStatus::Completed));
         }
-        store.select_workspace("/project-b").unwrap();
+        store.create_workspace().unwrap();
+        let project_b = store.current.get();
         assert!(store.tasks().unwrap().is_empty());
         assert!(store.set_task_complete(result[0].id, false).is_err());
         store.add_task("Other project").unwrap();
-        store.select_workspace("/project-a").unwrap();
-        store.new_conversation("/project-a").unwrap();
+        store.select(project_a).unwrap();
         assert_eq!(store.tasks().unwrap().len(), 3);
         store.replace_tasks(&json!({"tasks":[]})).unwrap();
         assert!(store.tasks().unwrap().is_empty());
-        store.select_workspace("/project-b").unwrap();
+        store.select(project_b).unwrap();
         assert_eq!(store.tasks().unwrap()[0].title, "Other project");
+        // Deleting a workspace removes its tasks with it.
+        store.delete_workspace(project_b).unwrap();
+        assert_eq!(store.current.get(), project_a);
+        assert!(store.select(project_b).is_err());
     }
 
     #[test]
@@ -204,14 +208,19 @@ mod tests {
         }
         {
             let store = Store::at_path(&path).unwrap();
-            assert_eq!(store.settings().unwrap().workspace_root, "/legacy");
-            let workspace = store.settings().unwrap().workspace_root;
-            store.select_workspace(&workspace).unwrap();
+            // The folder that owned the tasks becomes a workspace with that folder attached.
+            assert_eq!(store.folder().unwrap(), "/legacy");
+            assert_eq!(
+                store.conversation_state().unwrap().workspaces[0].name,
+                "legacy"
+            );
+            let legacy = store.current.get();
             let tasks = store.tasks().unwrap();
             assert_eq!(tasks.len(), 2);
-            store.select_workspace("/unrelated").unwrap();
+            store.create_workspace().unwrap();
             assert!(store.tasks().unwrap().is_empty());
-            store.select_workspace("/legacy").unwrap();
+            assert!(store.folder().unwrap().is_empty());
+            store.select(legacy).unwrap();
             assert_eq!(tasks[1].status, TaskStatus::Completed);
             store
                 .replace_tasks(&json!({"tasks":[{"title":"Resume me", "status":"in_progress"}]}))

@@ -4,7 +4,7 @@ A small native Rust + egui harness for local models: chat, workspace tools, expl
 
 ## Getting started
 
-1. Use **Open** in the sidebar to browse to an existing project folder, or **New** to choose a parent folder and create a project.
+1. Each sidebar entry is a **workspace**: one conversation with its own memory and tasks. Click **+** for a fresh one. To let the agent work on files, **Attach** a folder (or create one with **New folder**). Folders are optional.
 2. Click the provider name in the header. Choose **LM Studio**, **Ollama**, or **Custom OpenAI-compatible**. Set its base URL and optionally an exact model ID, then Save. Both `http://127.0.0.1:1234` and `http://127.0.0.1:1234/v1` work.
 3. Start the provider's OpenAI-compatible server and load a model. **Refresh** only discovers model IDs; **Available** means discovery worked. Click **Connect** to enable sending. **Disconnect** explicitly disables sending. Changing providers disconnects the previous one.
 4. Choose **Chat** for conversation, or **Agent** to let the model use tools. Enter a request and click Send or press Ctrl/Cmd+Enter. Plain Enter inserts a newline. Up/Down recall sent prompts when the input is single-line or already browsing history; Down past the newest entry restores the unsent draft. Multiline editing keeps normal arrow navigation.
@@ -31,21 +31,22 @@ Tool steps appear live in the reply, in order, with plain titles such as "Read s
 
 File tools reject traversal and symlink escapes. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Command output and model-facing tool observations are capped to keep memory and context bounded. Agent runs stop after sixteen model/tool rounds; send a follow-up to continue.
 
-## Conversations, summaries, and memory
+## Workspaces, summaries, and memory
 
-**New chat** creates a separate conversation in the active workspace. Use the conversation selector to reopen an earlier chat. User messages, streamed response checkpoints, tool activity, summaries, and conversation selection are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
+A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
 
-Long histories are compacted automatically before they reach the configured context budget. Set your model's supported size under provider settings → **Context budget**. This is a conservative byte-based token estimate, not an exact tokenizer. Compaction uses the selected model to update a rolling summary. If summarization fails, the run stops with an error and the original transcript stays intact. Full logs are retained; expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
+Long histories are compacted automatically before they reach the configured context budget (Settings → Provider and context budget). This is a conservative byte-based estimate, not an exact tokenizer. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
-**Memory** contains editable workspace notes shared by that workspace's conversations. The agent can propose a `remember` note for approval, or you can write notes yourself. For example: “Remember that we run cargo test before finishing a change.” Memory is explicitly maintained project knowledge, not an automatic record of every fact. Do not store secrets. Changing workspaces isolates both conversations and memory.
+**Memory** holds editable notes for the current workspace. The agent can propose a `remember` note for approval, or you can write notes yourself. Do not store secrets.
 
-## Workspace actions
+## Folder actions
 
-- **Open** launches the native system folder chooser, with normal desktop navigation and locations. Cancel keeps the current workspace.
-- **New** uses the native chooser to select a parent, then asks for a new folder name. Existing directories are never overwritten.
-- Linux needs a running desktop portal and file chooser backend (for example `xdg-desktop-portal` and `xdg-desktop-portal-gtk`). Windows and macOS use native dialogs.
-- **Delete** removes the selected saved entry and keeps all its files and conversations.
-- **Reset** requires typing the folder name. It moves the project to a sibling `.backup-…` folder, recreates the original path empty, and starts a new chat. Existing conversations and memory remain available. Reset is disabled during an active run. Original files can be recovered from the displayed backup path.
+- **Attach / Change** open the native system folder chooser. Cancel keeps the current folder.
+- **New folder** chooses a parent, then asks for a name. Existing directories are never overwritten.
+- **Detach** unlinks the folder; files stay on disk.
+- **Reset** requires typing the folder name. It moves the folder to a sibling `.backup-…` folder and recreates it empty; the conversation is kept.
+- The file tree refreshes every two seconds and after agent writes. Enter confirms dialogs.
+- Linux needs a running desktop portal and file chooser backend (for example `xdg-desktop-portal` and `xdg-desktop-portal-gtk`).
 
 ## Develop
 

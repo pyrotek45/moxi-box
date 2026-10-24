@@ -144,34 +144,19 @@ fn handle(
             let result = runtime.block_on(lm_studio::list_models(&base_url, &cancelled));
             send(events, AppEvent::ModelsLoaded { request_id, result });
         }
-        AppCommand::NewConversation { workspace } => match store.new_conversation(&workspace) {
-            Ok(()) => sync_conversation(store, events),
-            Err(error) => fail(events, error),
-        },
-        AppCommand::SelectConversation { workspace, id } => {
-            match store.select_conversation(&workspace, id) {
-                Ok(()) => sync_conversation(store, events),
-                Err(error) => fail(events, error),
-            }
-        }
-        AppCommand::SaveMemory { workspace, content } => {
-            match store.save_memory(&workspace, &content) {
-                Ok(()) => sync_conversation(store, events),
-                Err(error) => fail(events, error),
-            }
-        }
+        AppCommand::NewWorkspace => sync_after(store, events, store.create_workspace()),
+        AppCommand::SelectWorkspace(id) => sync_after(store, events, store.select(id)),
+        AppCommand::DeleteWorkspace(id) => sync_after(store, events, store.delete_workspace(id)),
+        AppCommand::SaveMemory(content) => sync_after(store, events, store.save_memory(&content)),
         AppCommand::ResetWorkspace { path } => {
             let result = tools::reset_workspace(&path).and_then(|backup| {
-                store.new_conversation(&path)?;
                 store.add_message(
                     MessageRole::Assistant,
-                    &format!("Workspace reset. Original files are archived at:\n{backup}"),
+                    &format!("Folder reset. Original files are archived at:\n{backup}"),
                 )?;
                 send(
                     events,
-                    AppEvent::Notice(format!(
-                        "Project reset. Original files archived at {backup}"
-                    )),
+                    AppEvent::Notice(format!("Folder reset. Original files archived at {backup}")),
                 );
                 tools::open_workspace(&path, false)
             });
@@ -181,11 +166,15 @@ fn handle(
                 sync_conversation(store, events);
             }
         }
-        AppCommand::OpenWorkspace { path, create } => {
-            let result = tools::open_workspace(&path, create).and_then(|(root, entries)| {
-                store.select_workspace(&root)?;
-                Ok((root, entries))
-            });
+        AppCommand::AttachFolder { path, create } => {
+            let result = if path.is_empty() {
+                store.set_folder("").map(|()| (String::new(), Vec::new()))
+            } else {
+                tools::open_workspace(&path, create).and_then(|(root, entries)| {
+                    store.set_folder(&root)?;
+                    Ok((root, entries))
+                })
+            };
             let success = result.is_ok();
             send(events, AppEvent::WorkspaceOpened(result));
             if success {
@@ -215,7 +204,7 @@ fn handle(
             Err(error) => fail(events, error),
         },
         AppCommand::SendChat {
-            settings,
+            mut settings,
             content,
             agent_mode,
             auto_approve,
@@ -224,6 +213,11 @@ fn handle(
             // Queued behind a run the user stopped.
             if cancelled.load(Ordering::Acquire) {
                 return;
+            }
+            // The store, not a possibly stale UI copy, decides which folder tools may touch.
+            match store.folder() {
+                Ok(folder) => settings.workspace_root = folder,
+                Err(error) => return fail(events, error),
             }
             if agent_mode {
                 agent::run_agent(
@@ -365,6 +359,13 @@ fn fail_run(store: &Store, events: &EventSender, error: String) {
         }
     }
     send(events, AppEvent::RunFailed(error));
+}
+
+fn sync_after(store: &Store, events: &EventSender, result: Result<(), String>) {
+    match result {
+        Ok(()) => sync_conversation(store, events),
+        Err(error) => fail(events, error),
+    }
 }
 
 fn sync_conversation(store: &Store, events: &EventSender) {

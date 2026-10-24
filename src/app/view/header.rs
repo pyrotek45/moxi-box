@@ -11,7 +11,7 @@ impl MoxiBoxApp {
                     widgets::status_badge(ui, self.provider_status());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if widgets::cog_button(ui).on_hover_text("Settings").clicked() { self.show_settings = true; }
-                        ui.toggle_value(&mut self.show_workspace, "Workspace");
+                        if widgets::sidebar_button(ui, self.show_workspace).on_hover_text(if self.show_workspace { "Hide sidebar" } else { "Show sidebar" }).clicked() { self.show_workspace = !self.show_workspace; }
                     });
                 });
                 ui.add_space(4.0);
