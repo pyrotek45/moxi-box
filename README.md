@@ -80,3 +80,5 @@ Chat bubbles render CommonMark formatting, including headings, emphasis, lists, 
 Use the top-right Settings gear for folder attachment, creation, detachment, reset, and workspace memory. The sidebar retains workspace navigation, files, and tasks.
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
+
+Failed-tool recovery: if the model ends a turn while a tool type has failed without a later successful call, Moxi supplies up to two correction prompts per user request before taking queued work. Recovery stays within the run turn limit, never replays tools automatically, and preserves approvals and cancellation. The model is told to inspect partial command effects before retrying and explain unrecoverable blockers. This improves the opportunity to recover; it does not guarantee model success.

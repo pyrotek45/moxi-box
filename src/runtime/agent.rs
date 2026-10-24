@@ -34,6 +34,7 @@ pub(super) fn run_agent(
     let mut messages = lm_studio::provider_messages(&prompt, &history);
     let mut reply = Reply::new(reply_id);
     let mut turns = 0;
+    let mut recovery = Recovery::default();
     while turns < MAX_TURNS {
         turns += 1;
         if let Err(error) = context::compact_agent(
@@ -89,7 +90,8 @@ pub(super) fn run_agent(
                     cancelled,
                 };
                 match tool.run(commands, deferred, call) {
-                    Ok(Some(observation)) => {
+                    Ok(Some((observation, success))) => {
+                        recovery.observe(&call.name, success);
                         lm_studio::append_tool_result(&mut messages, call, &observation)
                     }
                     Ok(None) => {
@@ -98,6 +100,18 @@ pub(super) fn run_agent(
                     }
                     Err(error) => return fail_run(store, events, error),
                 }
+            }
+        }
+        if response.tool_calls.is_empty() {
+            if let Some(instruction) = recovery.follow_up() {
+                messages.push(serde_json::json!({"role":"user","content":instruction}));
+                send(
+                    events,
+                    AppEvent::Notice(
+                        "Giving the model another chance to address failed tools…".into(),
+                    ),
+                );
+                continue;
             }
         }
         // Messages sent during the run steer it at this safe point, after a complete tool round.
@@ -114,6 +128,7 @@ pub(super) fn run_agent(
             user_id = steer_id;
             reply = Reply::new(reply_id);
             turns = 0;
+            recovery = Recovery::default();
         } else if response.tool_calls.is_empty() {
             return reply.finish(store, events);
         }
@@ -124,6 +139,29 @@ pub(super) fn run_agent(
         "Stopped after the sixteen-turn limit. Send a new message to continue.",
     );
     reply.finish(store, events);
+}
+
+/// Bounded correction opportunities; never replay a tool or bypass approval.
+#[derive(Default)]
+struct Recovery {
+    failed: std::collections::BTreeSet<String>,
+    follow_ups: usize,
+}
+impl Recovery {
+    fn observe(&mut self, tool: &str, success: bool) {
+        if success {
+            self.failed.remove(tool);
+        } else {
+            self.failed.insert(tool.to_owned());
+        }
+    }
+    fn follow_up(&mut self) -> Option<String> {
+        if self.failed.is_empty() || self.follow_ups >= 2 {
+            return None;
+        }
+        self.follow_ups += 1;
+        Some(format!("Harness recovery check: these tool types have failed without a later successful call: {}. Inspect their error results and the current state. If the user's request remains unfinished, correct the arguments, read the current file, or choose another appropriate tool and continue. Commands may have partially changed state: inspect before retrying. Do not repeat unchanged failing calls, bypass approval, or claim success without evidence. If recovery is impossible or an alternative already completed the work, explain that clearly and stop.", self.failed.iter().cloned().collect::<Vec<_>>().join(", ")))
+    }
 }
 
 /// Collect chat messages queued during the run; other commands stay deferred in order.
@@ -248,7 +286,7 @@ impl Tool<'_> {
         commands: &Receiver<AppCommand>,
         deferred: &mut VecDeque<AppCommand>,
         call: &ToolCall,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(String, bool)>, String> {
         self.check_cancelled()?;
         let approval =
             tools::requires_approval(&call.name) && !self.auto_approve.load(Ordering::Acquire);
@@ -286,6 +324,7 @@ impl Tool<'_> {
         }
         let result = self.execute(call);
         step.running = false;
+        let success = result.is_ok();
         let observation = match result {
             Ok(result) => {
                 step.title = tools::label(&call.name, &call.arguments, true);
@@ -300,11 +339,14 @@ impl Tool<'_> {
         };
         self.record(&step)?;
         self.check_cancelled()?;
-        Ok(Some(if call.name.ends_with("_tasks") {
-            observation
-        } else {
-            bounded(observation)
-        }))
+        Ok(Some((
+            if call.name.ends_with("_tasks") {
+                observation
+            } else {
+                bounded(observation)
+            },
+            success,
+        )))
     }
 
     fn execute(&self, call: &ToolCall) -> Result<String, String> {
@@ -484,5 +526,25 @@ mod tests {
         assert!(bounded.len() < MAX_OBSERVATION_BYTES);
         assert!(bounded.ends_with("narrower query.]"));
         assert_eq!(super::bounded("short".into()), "short");
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn recovery_is_bounded_and_success_clears_only_matching_tool() {
+        let mut recovery = Recovery::default();
+        assert!(recovery.follow_up().is_none());
+        recovery.observe("edit_file", false);
+        recovery.observe("read_file", true);
+        assert!(recovery.follow_up().unwrap().contains("edit_file"));
+        assert!(recovery.follow_up().is_some());
+        recovery.observe("edit_file", false);
+        assert!(recovery.follow_up().is_none());
+        let mut recovery = Recovery::default();
+        recovery.observe("edit_file", false);
+        recovery.observe("edit_file", true);
+        assert!(recovery.follow_up().is_none());
     }
 }
