@@ -74,3 +74,5 @@ In **Agent** mode, ask “Plan this work, implement it, verify it, and keep the 
 Task metadata updates need no approval. File changes, commands, and memory still require approval. Lists persist per workspace across restarts and conversations. You can also add tasks or toggle completion yourself in the sidebar. An empty task list intentionally clears the plan.
 
 Queued messages wait until the current tool sequence has finished, giving the agent a chance to recover from failed edits before starting the next request. Stop still cancels immediately. `replace_all` replaces all literal matches in one file with approval; missing matches leave the file unchanged. `update_tasks` replaces the whole list, so the agent must include existing tasks it wants to retain; it does not append.
+
+Chat bubbles render CommonMark formatting, including headings, emphasis, lists, links, quotes, tables, and fenced code with a copy button. Wide content scrolls horizontally within the bubble. Automatic image loading is disabled.

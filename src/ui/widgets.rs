@@ -658,30 +658,22 @@ pub fn bubble(ui: &mut egui::Ui, id: i64, role: MessageRole, body: impl FnOnce(&
 }
 
 pub fn message_text(ui: &mut egui::Ui, content: &str) {
-    for (index, part) in content.split("```").enumerate() {
-        if index % 2 == 1 {
-            let (language, code) = part.split_once('\n').unwrap_or(("", part));
-            egui::Frame::new()
-                .fill(Color32::from_gray(25))
-                .corner_radius(8)
-                .inner_margin(10)
-                .show(ui, |ui| {
-                    if !language.trim().is_empty() {
-                        ui.label(RichText::new(language).small().color(TEXT_MUTED));
-                    }
-                    ScrollArea::horizontal()
-                        .id_salt(("code", index))
-                        .show(ui, |ui| {
-                            ui.monospace(code.trim_end());
-                        });
-                });
-        } else {
-            for paragraph in part.trim().split("\n\n").filter(|text| !text.is_empty()) {
-                ui.add(egui::Label::new(RichText::new(paragraph).size(16.0)).wrap());
-                ui.add_space(4.0);
-            }
-        }
+    // Reuse renderer caches across streaming frames without enabling network image loaders.
+    thread_local! {
+        static MARKDOWN: std::cell::RefCell<egui_commonmark::CommonMarkCache> =
+            std::cell::RefCell::new(egui_commonmark::CommonMarkCache::default());
     }
+    let width = ui.available_width();
+    ScrollArea::horizontal()
+        .id_salt("markdown")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.set_max_width(width);
+
+            MARKDOWN.with(|cache| {
+                egui_commonmark::CommonMarkViewer::new().show(ui, &mut cache.borrow_mut(), content);
+            });
+        });
 }
 
 pub struct ComposerResponse {
