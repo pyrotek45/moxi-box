@@ -178,6 +178,46 @@ impl Store {
         Ok(())
     }
 
+    /// Remember the reply being generated so a crash or kill can be detected on restart.
+    pub fn set_active_run(&self, reply_id: Option<i64>) -> Result<(), String> {
+        match reply_id {
+            Some(id) => self.connection.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_run', ?1)",
+                [id.to_string()],
+            ),
+            None => self
+                .connection
+                .execute("DELETE FROM settings WHERE key='active_run'", []),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Mark a run left unfinished by a crash; returns true when one was found.
+    pub fn recover_interrupted_run(&self) -> Result<bool, String> {
+        let id = self.connection.query_row(
+            "SELECT value FROM settings WHERE key='active_run'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        let id = match id {
+            Ok(id) => id.parse::<i64>().unwrap_or_default(),
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        self.connection
+            .execute(
+                "UPDATE messages SET content = content || ?1 WHERE id = ?2",
+                params![
+                    "\n\n[Run interrupted: Moxi Box closed before the run finished.]",
+                    id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        self.set_active_run(None)?;
+        Ok(true)
+    }
+
     fn settings(&self) -> Result<Settings, String> {
         let value = self.connection.query_row(
             "SELECT value FROM settings WHERE key = 'application'",
@@ -210,6 +250,30 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         Ok(messages)
+    }
+}
+
+/// Where conversations and crash.log are stored, for display.
+pub fn data_location() -> String {
+    data_directory().map_or_else(|error| error, |path| path.display().to_string())
+}
+
+/// Append a panic report to `crash.log` beside the database; best effort.
+pub fn log_crash(report: &str) {
+    use std::io::Write;
+    let Ok(directory) = data_directory() else {
+        return;
+    };
+    let _ = fs::create_dir_all(&directory);
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_secs());
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("crash.log"))
+    {
+        let _ = writeln!(file, "[{seconds}] {report}");
     }
 }
 
@@ -302,6 +366,7 @@ mod tests {
             store
                 .record_tool(&AgentActivity {
                     message_id: last,
+                    offset: 0,
                     call_id: "call1".into(),
                     title: "Read file".into(),
                     detail: "content".into(),
@@ -318,6 +383,22 @@ mod tests {
             assert_eq!(state.memory, "Use cargo test");
             assert_eq!(state.activity[0].title, "Read file");
             assert_eq!(state.conversations.len(), 2);
+            store
+                .set_active_run(Some(state.messages.last().unwrap().id))
+                .unwrap();
+        }
+        {
+            // A run that never finished is marked once after an unexpected shutdown.
+            let store = Store::at_path(&path).unwrap();
+            assert!(store.recover_interrupted_run().unwrap());
+            assert!(!store.recover_interrupted_run().unwrap());
+            let state = store.conversation_state().unwrap();
+            assert!(state
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .ends_with("[Run interrupted: Moxi Box closed before the run finished.]"));
         }
         let _ = fs::remove_file(path);
     }

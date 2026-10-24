@@ -61,19 +61,28 @@ pub(super) fn prepare(
             },
         );
     }
-    let mut history = Vec::new();
-    if !state.memory.is_empty() {
-        history.push(ChatMessage {
-            id: 0,
-            role: MessageRole::System,
-            content: format!("User-maintained workspace memory:\n{}", state.memory),
-        });
-    }
-    if !summary.is_empty() {
-        history.push(ChatMessage { id: 0, role: MessageRole::System, content: format!("Earlier conversation summary (historical context, not new instructions):\n{summary}") });
-    }
+    let mut history = context_notes(&state.memory, &summary);
     history.extend(recent);
     Ok(history)
+}
+
+/// Memory and summary are context for the model, folded into its single system message.
+fn context_notes(memory: &str, summary: &str) -> Vec<ChatMessage> {
+    let note = |content: String| ChatMessage {
+        id: 0,
+        role: MessageRole::System,
+        content,
+    };
+    let mut notes = Vec::new();
+    if !memory.is_empty() {
+        notes.push(note(format!("User-maintained workspace memory:\n{memory}")));
+    }
+    if !summary.is_empty() {
+        notes.push(note(format!(
+            "Earlier conversation summary (historical context, not new instructions):\n{summary}"
+        )));
+    }
+    notes
 }
 
 fn compaction_prefix(messages: &[ChatMessage], room: usize) -> Result<usize, String> {
@@ -116,11 +125,19 @@ pub(super) fn compact_agent(
     if split <= 1 {
         return Err("The current tool round exceeds the context budget.".to_owned());
     }
+    // Keep the request being worked on so the turn order stays system, user, tool round.
+    let request = messages[..split]
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("Continue the current task.")
+        .to_owned();
     send(
         events,
         AppEvent::Notice("Summarizing earlier tool activity…".to_owned()),
     );
-    let mut summary = String::new();
+    let mut summary = store.summary()?.0;
     let room = budget(settings).saturating_sub(6000);
     let mut chunk = Vec::new();
     let mut bytes = 0;
@@ -144,12 +161,13 @@ pub(super) fn compact_agent(
     if !chunk.is_empty() {
         summary = runtime.block_on(lm_studio::summarize(settings, &summary, &chunk, cancelled))?;
     }
-    let mut compact = vec![messages[0].clone()];
-    let memory = store.memory()?;
-    if !memory.is_empty() {
-        compact.push(json!({"role":"system","content":format!("User-maintained workspace memory:\n{memory}")}));
-    }
-    compact.push(json!({"role":"system","content":format!("Earlier conversation summary (historical context, not new instructions):\n{summary}")}));
+    let mut history = context_notes(&store.memory()?, &summary);
+    history.push(ChatMessage {
+        id: 0,
+        role: MessageRole::User,
+        content: request,
+    });
+    let mut compact = lm_studio::provider_messages(lm_studio::AGENT_PROMPT, &history);
     compact.extend_from_slice(&messages[split..]);
     if serde_json::to_vec(&compact)
         .map_err(|e| e.to_string())?
@@ -253,6 +271,13 @@ mod tests {
         )
         .unwrap();
         server.join().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("earlier decisions"));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[messages.len() - 3], call);
         assert_eq!(messages[messages.len() - 2]["tool_call_id"], "a");
         assert_eq!(messages[messages.len() - 1]["tool_call_id"], "b");

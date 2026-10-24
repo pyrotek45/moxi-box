@@ -124,27 +124,49 @@ impl MoxiBoxApp {
                                 });
                             },
                         );
-                        ui.add_space(8.0);
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("FILES").small().color(TEXT_MUTED));
                         ScrollArea::vertical()
                             .id_salt("files")
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                             )
-                            .max_height(160.0)
+                            .max_height(240.0)
                             .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                // Entries arrive depth-first; skip descendants of collapsed folders.
+                                let mut hidden_below = usize::MAX;
                                 for entry in &self.workspace_entries {
-                                    if widgets::file_row(
-                                        ui,
-                                        entry,
-                                        self.preview
-                                            .as_ref()
-                                            .is_some_and(|(path, _)| path == &entry.path),
-                                    ) {
+                                    if entry.depth > hidden_below {
+                                        continue;
+                                    }
+                                    hidden_below = usize::MAX;
+                                    let expanded = self.expanded_folders.contains(&entry.path);
+                                    let selected = self
+                                        .preview
+                                        .as_ref()
+                                        .is_some_and(|(path, _)| path == &entry.path);
+                                    let clicked = widgets::file_row(ui, entry, selected, expanded);
+                                    if entry.is_directory {
+                                        if clicked && !self.expanded_folders.remove(&entry.path) {
+                                            self.expanded_folders.insert(entry.path.clone());
+                                        }
+                                        if !self.expanded_folders.contains(&entry.path) {
+                                            hidden_below = entry.depth;
+                                        }
+                                    } else if clicked {
                                         self.command(AppCommand::ReadPreview {
                                             root: self.settings.workspace_root.clone(),
                                             path: entry.path.clone(),
                                         });
                                     }
+                                }
+                                if self.workspace_entries.is_empty()
+                                    && !self.settings.workspace_root.is_empty()
+                                {
+                                    ui.label(
+                                        RichText::new("Empty folder").small().color(TEXT_MUTED),
+                                    );
                                 }
                             });
                         ui.add_space(12.0);
@@ -159,14 +181,24 @@ impl MoxiBoxApp {
                                 .color(TEXT_MUTED),
                         );
                         ui.add_enabled_ui(!self.run_pending && !self.workspace_pending, |ui| {
-                            for task in &self.tasks {
-                                if let Some(complete) = widgets::task_row(ui, task) {
-                                    self.command(AppCommand::SetTaskComplete {
-                                        id: task.id,
-                                        complete,
-                                    });
-                                }
-                            }
+                            ScrollArea::vertical()
+                                .id_salt("tasks")
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                )
+                                .max_height(176.0)
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    for task in &self.tasks {
+                                        if let Some(complete) = widgets::task_row(ui, task) {
+                                            self.command(AppCommand::SetTaskComplete {
+                                                id: task.id,
+                                                complete,
+                                            });
+                                        }
+                                    }
+                                });
+                            ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 let input_width = (ui.available_width() - 68.0).max(40.0);
                                 ui.allocate_ui(egui::vec2(input_width, 34.0), |ui| {

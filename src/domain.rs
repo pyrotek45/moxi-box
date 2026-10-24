@@ -114,6 +114,9 @@ pub struct WorkspaceEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentActivity {
     pub message_id: i64,
+    /// Byte length of the reply text when the step started, so steps render in order.
+    #[serde(default)]
+    pub offset: usize,
     pub call_id: String,
     pub title: String,
     pub detail: String,
@@ -180,6 +183,8 @@ pub enum AppCommand {
         settings: Settings,
         content: String,
         agent_mode: bool,
+        /// Read before each approval so toggling applies to the running agent.
+        auto_approve: std::sync::Arc<std::sync::atomic::AtomicBool>,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     ResolveApproval {
@@ -200,7 +205,7 @@ pub enum AppEvent {
         result: Result<Vec<String>, String>,
     },
     WorkspaceOpened(Result<(String, Vec<WorkspaceEntry>), String>),
-    ConnectionChanged(bool),
+    ProviderUnreachable,
     ConversationLoaded(ConversationState),
     ContextCompacted {
         summary: String,
@@ -226,6 +231,7 @@ pub enum AppEvent {
     ApprovalRequested {
         request_id: String,
         summary: String,
+        preview: String,
     },
     TasksUpdated(Vec<Task>),
     TaskAdded(Task),

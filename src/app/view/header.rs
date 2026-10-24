@@ -10,6 +10,7 @@ impl MoxiBoxApp {
                     ui.add_space(8.0);
                     widgets::status_badge(ui, self.provider_status());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::cog_button(ui).on_hover_text("Settings").clicked() { self.show_settings = true; }
                         ui.toggle_value(&mut self.show_workspace, "Workspace");
                     });
                 });
@@ -34,7 +35,8 @@ impl MoxiBoxApp {
                 });
                 if self.connection.checking { ui.label(RichText::new("Contacting model server…").small().color(TEXT_MUTED)); }
                 if let Some(error) = &self.connection.error {
-                    ui.add(egui::Label::new(RichText::new("Cannot reach the model server. Check the URL and that its server is running.").small().color(Color32::from_rgb(224, 155, 143))).wrap());
+                    let summary = if crate::provider::lm_studio::is_unreachable(error) { "Cannot reach the model server. Check the URL and that its server is running." } else { "The model server returned an error. See details." };
+                    ui.add(egui::Label::new(RichText::new(summary).small().color(Color32::from_rgb(224, 155, 143))).wrap());
                     egui::CollapsingHeader::new("Connection details").show(ui, |ui| {
                         ScrollArea::vertical().max_height(64.0).show(ui, |ui| { ui.add(egui::Label::new(error).wrap()); });
                     });

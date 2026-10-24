@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::lm_studio::normalize_base_url;
+use crate::provider::lm_studio::{default_model, normalize_base_url};
 
 #[derive(Default)]
 pub(super) struct Connection {
@@ -57,7 +57,7 @@ impl MoxiBoxApp {
                 self.models = models;
                 // Preserve an exact model ID even if discovery doesn't list it.
                 if self.settings.selected_model.is_none() {
-                    self.settings.selected_model = self.models.first().cloned();
+                    self.settings.selected_model = default_model(&self.models);
                     self.command(AppCommand::SaveSettings(self.settings.clone()));
                 }
                 self.connection.error = None;

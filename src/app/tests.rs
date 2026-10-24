@@ -1,13 +1,17 @@
 use super::*;
 
 fn fixture() -> (MoxiBoxApp, Sender<AppEvent>) {
-    let (commands, _) = mpsc::channel();
+    fixture_with_commands().0
+}
+
+fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppCommand>) {
+    let (commands, command_receiver) = mpsc::channel();
     let (events_tx, events) = mpsc::channel();
-    (
+    let app = (
         MoxiBoxApp {
             commands,
             cancelled: Arc::new(AtomicBool::new(false)),
-            show_toolbelt: false,
+            show_settings: false,
             events,
             settings: Settings::default(),
             models: vec![],
@@ -29,6 +33,7 @@ fn fixture() -> (MoxiBoxApp, Sender<AppEvent>) {
             folder_picker: None,
             history: PromptHistory::default(),
             approval: None,
+            auto_approve: Arc::new(AtomicBool::new(false)),
             activity: vec![],
             conversations: vec![],
             conversation_id: None,
@@ -39,12 +44,18 @@ fn fixture() -> (MoxiBoxApp, Sender<AppEvent>) {
             memory: String::new(),
             memory_draft: None,
             workspace_entries: vec![],
+            expanded_folders: Default::default(),
             preview: None,
             run_pending: false,
             show_workspace: true,
+            worker_lost: false,
+            queued: Default::default(),
+            tree_requested: std::time::Instant::now(),
+            tree_pending: false,
         },
         events_tx,
-    )
+    );
+    (app, command_receiver)
 }
 
 #[test]
@@ -237,8 +248,8 @@ fn modal_actions_remain_inside_compact_windows() {
                 "Save memory"
             }
             _ => {
-                app.show_toolbelt = true;
-                "Got it"
+                app.show_settings = true;
+                "Done"
             }
         };
         let context = egui::Context::default();
@@ -307,4 +318,56 @@ fn native_new_parent_waits_for_name() {
     assert!(app.workspace_dialog == Some(WorkspaceDialog::New));
     assert_eq!(app.workspace_path, "/parent");
     assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn a_lost_worker_unlocks_the_ui_with_a_notice() {
+    let (mut app, tx) = fixture();
+    app.run_pending = true;
+    drop(tx);
+    app.handle_events(&egui::Context::default());
+    assert!(!app.run_pending);
+    assert!(app.worker_lost);
+    assert!(app
+        .notice
+        .as_deref()
+        .unwrap()
+        .contains("background worker stopped"));
+}
+
+#[test]
+fn messages_sent_during_a_run_are_queued_and_share_its_stop_token() {
+    let ((mut app, tx), commands) = fixture_with_commands();
+    app.settings.selected_model = Some("model".into());
+    app.conversation_id = Some(1);
+    app.connection.connected = true;
+    app.composer = "first".into();
+    app.send_message();
+    let first = app.cancelled.clone();
+    app.composer = "steer this".into();
+    app.send_message();
+    assert!(Arc::ptr_eq(&first, &app.cancelled));
+    assert_eq!(app.queued.front().map(String::as_str), Some("steer this"));
+    assert_eq!(commands.try_iter().count(), 2);
+    let context = egui::Context::default();
+    tx.send(AppEvent::ChatUser(ChatMessage {
+        id: 9,
+        role: MessageRole::User,
+        content: "steer this".into(),
+    }))
+    .unwrap();
+    app.handle_events(&context);
+    assert!(app.queued.is_empty());
+}
+
+#[test]
+fn turning_on_auto_approve_approves_the_waiting_request() {
+    let ((mut app, _tx), commands) = fixture_with_commands();
+    app.approval = Some(("call-1".into(), "Edit a.rs?".into(), "- a\n+ b".into()));
+    app.set_auto_approve(true);
+    assert!(app.approval.is_none());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::ResolveApproval { request_id, approved: true }) if request_id == "call-1"
+    ));
 }

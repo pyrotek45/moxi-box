@@ -71,7 +71,7 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
         let (summary, compacted_through) = self.summary()?;
-        let mut query = self.connection.prepare("SELECT detail FROM tool_events WHERE conversation_id=?1 ORDER BY id DESC LIMIT 100").map_err(|e| e.to_string())?;
+        let mut query = self.connection.prepare("SELECT detail FROM tool_events WHERE conversation_id=?1 ORDER BY id DESC LIMIT 400").map_err(|e| e.to_string())?;
         let mut activity = query
             .query_map([self.current.get()], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?
