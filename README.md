@@ -81,6 +81,7 @@ Use the top-right Settings gear for folder attachment, creation, detachment, res
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
 
+Failed-tool recovery: if the model ends a turn while a tool type has failed without a later successful call, Moxi supplies up to two correction prompts per user request before taking queued work. Recovery stays within the run turn limit, never replays tools automatically, and preserves approvals and cancellation. The model is told to inspect partial command effects before retrying and explain unrecoverable blockers. This improves the opportunity to recover; it does not guarantee model success.
 Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 500 tree entries and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
 
 File editing accepts the canonical path/old_text/new_text fields plus filePath/oldString/newString aliases. Conflicting aliases are rejected. Copied numbered-line prefixes are removed from old_text only after an exact match fails; the resulting match must still be unique.
