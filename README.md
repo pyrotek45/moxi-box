@@ -80,3 +80,5 @@ Chat bubbles render CommonMark formatting, including headings, emphasis, lists, 
 Use the top-right Settings gear for folder attachment, creation, detachment, reset, and workspace memory. The sidebar retains workspace navigation, files, and tasks.
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
+
+Command execution is non-interactive: stdin is closed, and args must be an array of strings. Use unattended flags for build/install commands when appropriate. Commands retain explicit Stop support with no execution deadline. File writes and edits are limited to 256 KiB so the harness can read back and verify what it writes; oversized changes leave existing files untouched. Provider HTTP connections are reused across requests.
