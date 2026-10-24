@@ -4,6 +4,8 @@ use super::*;
 pub(super) enum WorkspaceDialog {
     /// Name a new folder inside the chosen parent.
     NewFolder,
+    /// Name a new workspace (None) or rename an existing one.
+    Name(Option<i64>),
     Delete(i64),
     Reset,
 }
@@ -23,11 +25,17 @@ impl MoxiBoxApp {
             && self.folder_picker.is_none()
     }
 
-    pub(super) fn new_workspace(&mut self) {
-        if self.idle() {
-            self.switching = true;
-            self.command(AppCommand::NewWorkspace);
+    /// Open the name dialog for a new workspace (None) or a rename.
+    pub(super) fn name_workspace(&mut self, id: Option<i64>) {
+        if !self.idle() {
+            return;
         }
+        self.workspace_error = None;
+        self.workspace_name = id
+            .and_then(|id| self.workspaces.iter().find(|workspace| workspace.id == id))
+            .map(|workspace| workspace.name.clone())
+            .unwrap_or_default();
+        self.workspace_dialog = Some(WorkspaceDialog::Name(id));
     }
 
     pub(super) fn select_workspace(&mut self, id: i64) {

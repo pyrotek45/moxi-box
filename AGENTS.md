@@ -5,7 +5,7 @@ Keep this a small, understandable Rust + egui agent harness. Prefer concrete mod
 ## Core principles
 
 - **Tight and stable core.** The agent loop (`runtime/agent.rs`), provider transport, and tools stay small, linear, and boring. Stability beats features: every failure path ends a run with a visible, saved message, never a hung UI or lost transcript. Add a feature only when it keeps the core simple.
-- **Useful toolbelt.** A small set of reliable tools covers agentic coding: list/read/search, `edit_file` (exact replace), `write_file`, `run_command`, tasks, and `remember`. Prefer improving these over adding tools.
+- **Useful toolbelt.** A small set of reliable tools covers agentic coding: list/read/search, `edit_file` (exact replace), `write_file`, `run_command`, tasks, and `remember`, plus optional `web_search`/`fetch_url` behind the Web access setting (off by default; offered to the model only when on). Prefer improving these over adding tools. Keep generated tool-call IDs nine alphanumeric characters: Mistral templates reject others.
 - **Context compaction that works.** Long runs and conversations must keep going: rolling summaries, bounded tool output, and the full transcript preserved.
 - **Simple UX.** As few controls as possible while staying efficient. Every button must work; Enter confirms dialogs. Show what the agent is doing in plain language (readable step titles, diffs for edits), not raw JSON.
 - **Long-running and recoverable.** A panic in the worker is caught per command and reported; the active run is recorded so a crash or kill is detected and marked on restart; panics are written to `crash.log` beside the database.

@@ -5,6 +5,7 @@ mod runtime;
 mod storage;
 mod tools;
 mod ui;
+mod web;
 
 fn main() -> eframe::Result<()> {
     let report = std::panic::take_hook();

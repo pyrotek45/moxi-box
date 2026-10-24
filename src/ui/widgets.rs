@@ -264,6 +264,7 @@ pub fn plus_button(ui: &mut egui::Ui) -> egui::Response {
 
 pub enum RowAction {
     Select,
+    Rename,
     Delete,
 }
 
@@ -341,8 +342,10 @@ pub fn workspace_row(
     } else {
         format!("{} · {}", workspace.name, workspace.folder)
     };
-    let response = response.on_hover_text(hover);
-    if response.clicked() {
+    let response = response.on_hover_text(format!("{hover}\nDouble-click to rename"));
+    if response.double_clicked() && !over_delete {
+        Some(RowAction::Rename)
+    } else if response.clicked() {
         Some(if over_delete {
             RowAction::Delete
         } else {
