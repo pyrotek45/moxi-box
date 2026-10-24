@@ -28,6 +28,13 @@ pub fn primary_button(label: &str) -> egui::Button<'_> {
         .min_size(egui::vec2(72.0, 34.0))
 }
 
+/// Red confirm button for actions that delete or archive.
+pub fn danger_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
+        .fill(Color32::from_rgb(185, 28, 28))
+        .corner_radius(8.0)
+}
+
 pub fn secondary_button(label: &str) -> egui::Button<'_> {
     egui::Button::new(RichText::new(label).strong())
         .fill(SURFACE_RAISED)
@@ -40,7 +47,7 @@ pub fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Re
         .fill(SURFACE_RAISED)
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(9, 3))
-        .stroke(egui::Stroke::NONE)
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(68)))
         .show(ui, |ui| {
             ui.add_sized(
                 [ui.available_width(), 26.0],
@@ -232,6 +239,158 @@ pub fn message_bubble(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool)
             message_text(ui, &message.content);
         }
     });
+}
+
+/// A small painted "+" button.
+pub fn plus_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 6.0, SURFACE_RAISED);
+    }
+    let color = if ui.is_enabled() { TEXT } else { TEXT_MUTED };
+    let stroke = egui::Stroke::new(1.6_f32, color);
+    let center = rect.center();
+    painter.line_segment(
+        [center - egui::vec2(5.0, 0.0), center + egui::vec2(5.0, 0.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [center - egui::vec2(0.0, 5.0), center + egui::vec2(0.0, 5.0)],
+        stroke,
+    );
+    response
+}
+
+pub enum RowAction {
+    Select,
+    Delete,
+}
+
+/// A compact workspace row; hovering reveals a painted delete button.
+pub fn workspace_row(
+    ui: &mut egui::Ui,
+    workspace: &crate::domain::Workspace,
+    selected: bool,
+    enabled: bool,
+) -> Option<RowAction> {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), sense);
+    let painter = ui.painter_at(rect);
+    let hovered = response.hovered();
+    if selected {
+        painter.rect_filled(rect, 6.0, SURFACE_RAISED);
+    } else if hovered {
+        painter.rect_filled(rect, 6.0, Color32::from_white_alpha(6));
+    }
+    let delete = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 14.0, rect.center().y),
+        egui::vec2(20.0, 20.0),
+    );
+    let show_delete = enabled && hovered;
+    let right = if show_delete {
+        delete.left() - 4.0
+    } else {
+        rect.right() - 8.0
+    };
+    let text_rect = egui::Rect::from_x_y_ranges(
+        (rect.left() + 10.0)..=right.max(rect.left() + 10.0),
+        rect.y_range(),
+    );
+    let color = if selected { Color32::WHITE } else { TEXT };
+    let galley = ui.painter().layout_no_wrap(
+        workspace.name.clone(),
+        egui::FontId::proportional(13.5),
+        color,
+    );
+    painter.with_clip_rect(text_rect).galley(
+        egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    let pointer = response.hover_pos();
+    let over_delete = show_delete && pointer.is_some_and(|pos| delete.contains(pos));
+    if show_delete {
+        if over_delete {
+            painter.rect_filled(delete, 4.0, Color32::from_rgb(90, 36, 36));
+        }
+        let stroke = egui::Stroke::new(
+            1.4_f32,
+            if over_delete {
+                Color32::from_rgb(252, 165, 165)
+            } else {
+                TEXT_MUTED
+            },
+        );
+        let c = delete.center();
+        painter.line_segment(
+            [c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)],
+            stroke,
+        );
+        painter.line_segment(
+            [c + egui::vec2(-3.5, 3.5), c + egui::vec2(3.5, -3.5)],
+            stroke,
+        );
+    }
+    let hover = if workspace.folder.is_empty() {
+        format!("{} · no folder", workspace.name)
+    } else {
+        format!("{} · {}", workspace.name, workspace.folder)
+    };
+    let response = response.on_hover_text(hover);
+    if response.clicked() {
+        Some(if over_delete {
+            RowAction::Delete
+        } else {
+            RowAction::Select
+        })
+    } else {
+        None
+    }
+}
+
+/// Give a dialog's text field keyboard focus when nothing else has it, so typing works at once.
+pub fn focus_if_idle(ui: &egui::Ui, field: &egui::Response) {
+    if ui.memory(|memory| memory.focused().is_none()) {
+        field.request_focus();
+    }
+}
+
+/// True when Enter (without modifiers) was pressed this frame; dialogs use it to confirm.
+pub fn enter_pressed(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.key_pressed(egui::Key::Enter) && input.modifiers.is_none())
+}
+
+/// A painted sidebar icon: a rounded window with a left panel, filled when shown.
+pub fn sidebar_button(ui: &mut egui::Ui, shown: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 8.0, SURFACE_RAISED);
+    }
+    let color = if response.hovered() { TEXT } else { TEXT_MUTED };
+    let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 14.0));
+    painter.rect_stroke(
+        frame,
+        3.0,
+        egui::Stroke::new(1.5_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    let panel = egui::Rect::from_min_max(frame.min, egui::pos2(frame.left() + 6.0, frame.bottom()));
+    if shown {
+        painter.rect_filled(panel, 2.0, color);
+    } else {
+        painter.vline(
+            panel.right(),
+            frame.y_range(),
+            egui::Stroke::new(1.5_f32, color),
+        );
+    }
+    response
 }
 
 /// A painted gear icon button.

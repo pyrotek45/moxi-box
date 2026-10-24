@@ -41,10 +41,10 @@ impl MoxiBoxApp {
                     ui.label(RichText::new("DATA").small().color(TEXT_MUTED));
                     let location = crate::storage::data_location();
                     ui.add(egui::Label::new(RichText::new(&location).small()).truncate()).on_hover_text(&location);
-                    ui.label(RichText::new("Conversations, memory, tasks, and crash.log live here.").small().color(TEXT_MUTED));
+                    ui.label(RichText::new("Workspaces, memory, tasks, and crash.log live here.").small().color(TEXT_MUTED));
                 });
                 ui.add_space(12.0);
-                close = ui.add(widgets::primary_button("Done")).clicked();
+                close = ui.add(widgets::primary_button("Done")).clicked() || widgets::enter_pressed(ui);
             });
         if open_provider {
             self.provider_draft = Some(self.settings.clone());

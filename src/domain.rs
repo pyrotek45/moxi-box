@@ -9,8 +9,6 @@ pub const DEFAULT_WINDOW_HEIGHT: f32 = 800.0;
 pub struct Settings {
     #[serde(default = "default_provider_name")]
     pub provider_name: String,
-    #[serde(default)]
-    pub workspaces: Vec<String>,
     #[serde(default = "default_context_budget")]
     pub context_budget: usize,
     pub lm_studio_url: String,
@@ -23,7 +21,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             provider_name: default_provider_name(),
-            workspaces: Vec::new(),
             context_budget: default_context_budget(),
             lm_studio_url: DEFAULT_LM_STUDIO_URL.to_owned(),
             selected_model: None,
@@ -41,10 +38,7 @@ fn default_provider_name() -> String {
 }
 
 fn default_workspace_root() -> String {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .display()
-        .to_string()
+    String::new()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,16 +117,20 @@ pub struct AgentActivity {
     pub running: bool,
 }
 
+/// One conversation with its own memory and tasks; the folder is optional.
 #[derive(Debug, Clone)]
-pub struct Conversation {
+pub struct Workspace {
     pub id: i64,
-    pub title: String,
+    pub name: String,
+    pub folder: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConversationState {
     pub current: i64,
-    pub conversations: Vec<Conversation>,
+    /// The current workspace's folder, or empty when none is attached.
+    pub folder: String,
+    pub workspaces: Vec<Workspace>,
     pub messages: Vec<ChatMessage>,
     pub summary: String,
     pub compacted_through: i64,
@@ -143,17 +141,10 @@ pub struct ConversationState {
 #[derive(Debug, Clone)]
 pub enum AppCommand {
     Load,
-    NewConversation {
-        workspace: String,
-    },
-    SelectConversation {
-        workspace: String,
-        id: i64,
-    },
-    SaveMemory {
-        workspace: String,
-        content: String,
-    },
+    NewWorkspace,
+    SelectWorkspace(i64),
+    DeleteWorkspace(i64),
+    SaveMemory(String),
     SaveSettings(Settings),
     RefreshModels {
         request_id: u64,
@@ -163,7 +154,8 @@ pub enum AppCommand {
     ResetWorkspace {
         path: String,
     },
-    OpenWorkspace {
+    /// Attach a folder to the current workspace; create makes a new folder first. Empty path detaches.
+    AttachFolder {
         path: String,
         create: bool,
     },
@@ -251,7 +243,6 @@ mod tests {
     fn existing_settings_load_without_new_fields() {
         let settings: Settings = serde_json::from_str(r#"{"lm_studio_url":"http://localhost:1234","selected_model":null,"workspace_root":"/tmp/project"}"#).unwrap();
         assert_eq!(settings.provider_name, "LM Studio");
-        assert!(settings.workspaces.is_empty());
         assert_eq!(settings.workspace_root, "/tmp/project");
     }
 }

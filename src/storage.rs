@@ -1,26 +1,22 @@
 mod conversations;
 mod tasks;
 
-use std::{
-    cell::{Cell, RefCell},
-    fs,
-    path::PathBuf,
-};
+use std::{cell::Cell, fs, path::PathBuf};
 
 use rusqlite::{params, Connection};
 
 use crate::domain::{
-    AgentActivity, ChatMessage, Conversation, ConversationState, MessageRole, Settings, Task,
+    AgentActivity, ChatMessage, ConversationState, MessageRole, Settings, Task, Workspace,
 };
 
 const DATABASE_DIRECTORY: &str = "moxi-box";
 const DATABASE_FILENAME: &str = "moxi-box.sqlite";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
+/// A workspace is one conversation with its own memory and tasks, and an optional folder.
 pub struct Store {
     connection: Connection,
     current: Cell<i64>,
-    workspace: RefCell<String>,
 }
 
 impl Store {
@@ -40,12 +36,10 @@ impl Store {
             .map_err(|e| e.to_string())?;
         let store = Self {
             connection,
-            current: Cell::new(1),
-            workspace: RefCell::new(String::new()),
+            current: Cell::new(0),
         };
         store.migrate()?;
-        let settings = store.settings()?;
-        store.select_workspace(&settings.workspace_root)?;
+        store.select_initial()?;
         Ok(store)
     }
 
@@ -60,7 +54,7 @@ impl Store {
                 "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                  CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0);
-                 CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL);",
+                 CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, conversation_id INTEGER NOT NULL DEFAULT 1);",
             )
             .map_err(|error| error.to_string())?;
         let count: i64 = self
@@ -68,13 +62,17 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
         if count == 0 {
+            // Unversioned databases run every migration; each is a no-op on a fresh database.
             self.connection
-                .execute(
-                    "INSERT INTO schema_version (version) VALUES (?1)",
-                    [SCHEMA_VERSION],
-                )
+                .execute("INSERT INTO schema_version (version) VALUES (0)", [])
                 .map_err(|error| error.to_string())?;
         }
+        let version: i64 = self
+            .connection
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
+            .map_err(|error| error.to_string())?;
         self.connection
             .execute_batch("BEGIN IMMEDIATE;")
             .map_err(|e| e.to_string())?;
@@ -99,6 +97,9 @@ impl Store {
                 self.connection.execute_batch("ALTER TABLE messages ADD COLUMN conversation_id INTEGER NOT NULL DEFAULT 1;").map_err(|e| e.to_string())?;
             }
             self.migrate_tasks()?;
+            if version < 4 {
+                self.migrate_to_workspaces()?;
+            }
             self.connection.execute_batch("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);").map_err(|e| e.to_string())?;
             self.connection
                 .execute("UPDATE schema_version SET version=?1", [SCHEMA_VERSION])
@@ -159,8 +160,8 @@ impl Store {
                     .collect::<String>();
                 self.connection
                     .execute(
-                        "UPDATE conversations SET title=?1 WHERE id=?2",
-                        params![title, self.current.get()],
+                        "UPDATE conversations SET title=?1 WHERE id=?2 AND title IN (?3, 'New conversation')",
+                        params![title, self.current.get(), conversations::DEFAULT_NAME],
                     )
                     .map_err(|e| e.to_string())?;
             }
@@ -308,12 +309,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_history_migrates_and_conversations_summaries_memory_survive_restart() {
+    fn legacy_folders_become_workspaces_and_state_survives_restart() {
         let path = std::env::temp_dir().join(format!("moxi-storage-{}.sqlite", std::process::id()));
         let _ = fs::remove_file(&path);
         {
+            // Schema 3: two conversations in one folder sharing folder-keyed memory.
             let connection = Connection::open(&path).unwrap();
-            connection.execute_batch("CREATE TABLE messages(id INTEGER PRIMARY KEY,role TEXT NOT NULL,content TEXT NOT NULL); INSERT INTO messages(role,content) VALUES('user','legacy message'); CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);").unwrap();
+            connection.execute_batch("
+                CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE schema_version(version INTEGER NOT NULL); INSERT INTO schema_version VALUES(3);
+                CREATE TABLE messages(id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, conversation_id INTEGER NOT NULL DEFAULT 1);
+                CREATE TABLE conversations(id INTEGER PRIMARY KEY, workspace TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', compacted_through INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE workspace_state(workspace TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL);
+                CREATE TABLE workspace_memory(workspace TEXT PRIMARY KEY, content TEXT NOT NULL);
+                INSERT INTO conversations(id, workspace, title) VALUES(1, '/tmp/project-one', 'Previous conversation'), (2, '/tmp/project-one', 'Fix the parser');
+                INSERT INTO messages(role, content, conversation_id) VALUES('user', 'legacy message', 1), ('user', 'second chat', 2);
+                INSERT INTO workspace_state VALUES('/tmp/project-one', 1);
+                INSERT INTO workspace_memory VALUES('/tmp/project-one', 'Use cargo test');
+            ").unwrap();
             let settings = Settings {
                 workspace_root: "/tmp/project-one".into(),
                 ..Settings::default()
@@ -326,12 +339,20 @@ mod tests {
                 .unwrap();
         }
         let first_id;
+        let second_id;
         {
             let store = Store::at_path(&path).unwrap();
-            assert_eq!(
-                store.conversation_state().unwrap().messages[0].content,
-                "legacy message"
-            );
+            let state = store.conversation_state().unwrap();
+            assert_eq!(state.current, 1);
+            assert_eq!(state.folder, "/tmp/project-one");
+            assert_eq!(state.messages[0].content, "legacy message");
+            assert_eq!(state.memory, "Use cargo test");
+            let names = state
+                .workspaces
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["Fix the parser", "project-one"]);
             first_id = store.current.get();
             for _ in 0..510 {
                 store
@@ -350,20 +371,6 @@ mod tests {
                 .id;
             store.save_summary("durable summary", last).unwrap();
             store
-                .save_memory("/tmp/project-one", "Use cargo test")
-                .unwrap();
-            store.new_conversation("/tmp/project-one").unwrap();
-            assert!(store.conversation_state().unwrap().messages.is_empty());
-            assert_eq!(store.memory().unwrap(), "Use cargo test");
-            store.select_workspace("/tmp/project-two").unwrap();
-            assert!(store.memory().unwrap().is_empty());
-            assert!(store
-                .select_conversation("/tmp/project-two", first_id)
-                .is_err());
-            store
-                .select_conversation("/tmp/project-one", first_id)
-                .unwrap();
-            store
                 .record_tool(&AgentActivity {
                     message_id: last,
                     offset: 0,
@@ -373,6 +380,24 @@ mod tests {
                     running: false,
                 })
                 .unwrap();
+            // Memory belongs to each workspace separately after migration.
+            store.select(2).unwrap();
+            assert_eq!(store.memory().unwrap(), "Use cargo test");
+            store.save_memory("Only for the parser").unwrap();
+            // A new workspace starts empty, without a folder, and is auto-named.
+            store.create_workspace().unwrap();
+            second_id = store.current.get();
+            let state = store.conversation_state().unwrap();
+            assert!(state.messages.is_empty() && state.memory.is_empty());
+            assert!(state.folder.is_empty());
+            store
+                .add_message(MessageRole::User, "Plan a trip\nwith details")
+                .unwrap();
+            store.set_folder("/tmp/trip").unwrap();
+            let state = store.conversation_state().unwrap();
+            assert_eq!(state.workspaces[0].name, "Plan a trip");
+            assert_eq!(state.folder, "/tmp/trip");
+            store.select(first_id).unwrap();
         }
         {
             let store = Store::at_path(&path).unwrap();
@@ -382,24 +407,35 @@ mod tests {
             assert_eq!(state.summary, "durable summary");
             assert_eq!(state.memory, "Use cargo test");
             assert_eq!(state.activity[0].title, "Read file");
-            assert_eq!(state.conversations.len(), 2);
-            store
-                .set_active_run(Some(state.messages.last().unwrap().id))
-                .unwrap();
+            assert_eq!(state.workspaces.len(), 3);
+            store.select(2).unwrap();
+            assert_eq!(store.memory().unwrap(), "Only for the parser");
+            store.select(second_id).unwrap();
+            store.set_active_run(Some(1)).unwrap();
         }
         {
             // A run that never finished is marked once after an unexpected shutdown.
             let store = Store::at_path(&path).unwrap();
             assert!(store.recover_interrupted_run().unwrap());
             assert!(!store.recover_interrupted_run().unwrap());
-            let state = store.conversation_state().unwrap();
-            assert!(state
-                .messages
-                .last()
-                .unwrap()
+            assert_eq!(store.current.get(), second_id);
+            store.select(1).unwrap();
+            assert!(store.conversation_state().unwrap().messages[0]
                 .content
                 .ends_with("[Run interrupted: Moxi Box closed before the run finished.]"));
         }
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_fresh_database_starts_with_one_folderless_workspace() {
+        let store = Store::in_memory();
+        let state = store.conversation_state().unwrap();
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].name, "New workspace");
+        assert!(state.folder.is_empty());
+        store.delete_workspace(state.current).unwrap();
+        // Deleting the last workspace leaves a fresh one rather than none.
+        assert_eq!(store.conversation_state().unwrap().workspaces.len(), 1);
     }
 }
