@@ -14,6 +14,7 @@ impl MoxiBoxApp {
                 ui.label("3. Review each requested write, command, or memory note. Approve runs it once; Deny stops the run. Use Stop to interrupt a slow request or command.");
                 ui.add_space(8.0);
                 for (name,help) in [
+                    ("Tasks", "Read the saved workspace plan with list_tasks. update_tasks creates or replaces the whole list, including pending, in-progress, and completed items. It can finish several tasks in one call after checking their results. Task updates run automatically and appear in the sidebar; files and commands still require approval."),
                     ("List files", "Inspect workspace filenames. Automatic."),
                     ("Read file", "Read a UTF-8 workspace file, up to 256 KiB. Automatic."),
                     ("Search content", "Find matching lines in workspace text files. Automatic."),

@@ -144,7 +144,7 @@ fn composer_actions_fit_small_and_default_windows() {
         app.tasks.push(Task {
             id: 1,
             title: "Long task title ".repeat(12),
-            complete: false,
+            status: crate::domain::TaskStatus::Pending,
         });
         let context = egui::Context::default();
         theme::install_theme(&context);

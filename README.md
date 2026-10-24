@@ -62,3 +62,9 @@ In the prepared cloud environment, source `/workspace/.moxi-tools/env.sh` first.
 `domain` holds shared types; `app` owns state and panels; `ui` owns the theme and widgets; `runtime` handles background commands, the agent loop, and context compaction; `provider` handles transport; `tools` handles workspace operations; `storage` handles SQLite and conversation state. See [AGENTS.md](AGENTS.md) for extension and visual-verification rules.
 
 Inter is licensed under the SIL Open Font License; see `assets/fonts/OFL.txt`.
+
+### Agent task lists
+
+In **Agent** mode, ask “Plan this work, implement it, verify it, and keep the task list updated.” The agent can use `list_tasks` to resume the saved workspace plan and `update_tasks` to create or update it. A single call replaces the complete list, so it can mark several tasks completed together while retaining unfinished items. Each item has `title` and `status` (`pending`, `in_progress`, or `completed`). The agent should verify results before marking completion; a completed status is the agent’s report, not an independent test result.
+
+Task metadata updates need no approval. File changes, commands, and memory still require approval. Lists persist per workspace across restarts and conversations. You can also add tasks or toggle completion yourself in the sidebar. An empty task list intentionally clears the plan.

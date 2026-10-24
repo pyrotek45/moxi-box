@@ -232,10 +232,15 @@ impl MoxiBoxApp {
                     self.preview = None;
                     self.approval = Some((request_id, summary));
                 }
+                AppEvent::TasksUpdated(tasks) => self.tasks = tasks,
                 AppEvent::TaskAdded(task) => self.tasks.push(task),
                 AppEvent::TaskChanged { id, complete } => {
                     if let Some(task) = self.tasks.iter_mut().find(|task| task.id == id) {
-                        task.complete = complete;
+                        task.status = if complete {
+                            crate::domain::TaskStatus::Completed
+                        } else {
+                            crate::domain::TaskStatus::Pending
+                        };
                     }
                 }
                 AppEvent::Notice(message) => self.notice = Some(message),

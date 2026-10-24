@@ -148,30 +148,41 @@ impl MoxiBoxApp {
                                 }
                             });
                         ui.add_space(12.0);
-                        ui.label(RichText::new("TASKS").small().color(TEXT_MUTED));
-                        for task in &self.tasks {
-                            if let Some(complete) = widgets::task_row(ui, task) {
-                                self.command(AppCommand::SetTaskComplete {
-                                    id: task.id,
-                                    complete,
+                        let completed = self
+                            .tasks
+                            .iter()
+                            .filter(|task| task.status == crate::domain::TaskStatus::Completed)
+                            .count();
+                        ui.label(
+                            RichText::new(format!("TASKS  {completed}/{}", self.tasks.len()))
+                                .small()
+                                .color(TEXT_MUTED),
+                        );
+                        ui.add_enabled_ui(!self.run_pending && !self.workspace_pending, |ui| {
+                            for task in &self.tasks {
+                                if let Some(complete) = widgets::task_row(ui, task) {
+                                    self.command(AppCommand::SetTaskComplete {
+                                        id: task.id,
+                                        complete,
+                                    });
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                let input_width = (ui.available_width() - 68.0).max(40.0);
+                                ui.allocate_ui(egui::vec2(input_width, 34.0), |ui| {
+                                    widgets::text_field(ui, &mut self.new_task, "New task");
                                 });
-                            }
-                        }
-                        ui.horizontal(|ui| {
-                            let input_width = (ui.available_width() - 68.0).max(40.0);
-                            ui.allocate_ui(egui::vec2(input_width, 34.0), |ui| {
-                                widgets::text_field(ui, &mut self.new_task, "New task");
+                                if ui
+                                    .add_enabled(
+                                        !self.new_task.trim().is_empty(),
+                                        widgets::secondary_button("Add"),
+                                    )
+                                    .clicked()
+                                {
+                                    let title = std::mem::take(&mut self.new_task);
+                                    self.command(AppCommand::AddTask(title));
+                                }
                             });
-                            if ui
-                                .add_enabled(
-                                    !self.new_task.trim().is_empty(),
-                                    widgets::secondary_button("Add"),
-                                )
-                                .clicked()
-                            {
-                                let title = std::mem::take(&mut self.new_task);
-                                self.command(AppCommand::AddTask(title));
-                            }
                         });
                     });
             });
