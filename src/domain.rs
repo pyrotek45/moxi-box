@@ -15,6 +15,9 @@ pub struct Settings {
     pub selected_model: Option<String>,
     #[serde(default = "default_workspace_root")]
     pub workspace_root: String,
+    /// Lets the agent search the web and read pages. Off by default.
+    #[serde(default)]
+    pub web_access: bool,
 }
 
 impl Default for Settings {
@@ -25,6 +28,7 @@ impl Default for Settings {
             lm_studio_url: DEFAULT_LM_STUDIO_URL.to_owned(),
             selected_model: None,
             workspace_root: default_workspace_root(),
+            web_access: false,
         }
     }
 }
@@ -141,7 +145,12 @@ pub struct ConversationState {
 #[derive(Debug, Clone)]
 pub enum AppCommand {
     Load,
-    NewWorkspace,
+    /// Create and switch to a workspace; a blank name uses the default.
+    NewWorkspace(String),
+    RenameWorkspace {
+        id: i64,
+        name: String,
+    },
     SelectWorkspace(i64),
     DeleteWorkspace(i64),
     SaveMemory(String),

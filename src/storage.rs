@@ -428,6 +428,30 @@ mod tests {
     }
 
     #[test]
+    fn workspaces_can_be_named_and_renamed() {
+        let store = Store::in_memory();
+        store.create_named_workspace("  Trip planning ").unwrap();
+        let id = store.current.get();
+        // A chosen name is kept when the first message arrives.
+        store
+            .add_message(MessageRole::User, "Find flights")
+            .unwrap();
+        assert_eq!(
+            store.conversation_state().unwrap().workspaces[0].name,
+            "Trip planning"
+        );
+        store.rename_workspace(id, "Holiday").unwrap();
+        assert_eq!(
+            store.conversation_state().unwrap().workspaces[0].name,
+            "Holiday"
+        );
+        assert!(store.rename_workspace(id, "  ").is_err());
+        assert!(store.rename_workspace(id, "two\nlines").is_err());
+        assert!(store.rename_workspace(9999, "Gone").is_err());
+        assert!(store.create_named_workspace(&"x".repeat(81)).is_err());
+    }
+
+    #[test]
     fn a_fresh_database_starts_with_one_folderless_workspace() {
         let store = Store::in_memory();
         let state = store.conversation_state().unwrap();

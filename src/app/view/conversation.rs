@@ -15,13 +15,14 @@ impl MoxiBoxApp {
                         if response.stop { self.stop(); }
                         ui.vertical_centered(|ui| { ui.label(RichText::new("Local models. Your workspace. You're in control.").small().color(TEXT_MUTED)); });
                     });
+                let mut rename = false;
                 ui.horizontal_wrapped(|ui| {
-                    let title = self.workspaces.iter().find(|workspace| Some(workspace.id) == self.workspace_id).map_or("Moxi", |workspace| workspace.name.as_str());
-// Leave room for the mode buttons beside a long workspace name.
+                    let title = self.workspaces.iter().find(|workspace| Some(workspace.id) == self.workspace_id).map_or("Moxi".to_owned(), |workspace| workspace.name.clone());
+                    // Leave room for the mode buttons beside a long workspace name.
                     let room = (ui.available_width() - 190.0).max(80.0);
                     ui.scope(|ui| {
                         ui.set_max_width(room);
-                        ui.add(egui::Label::new(RichText::new(if self.preview.is_some() { "File preview" } else { title }).heading()).truncate()).on_hover_text(title);
+                        if ui.add(egui::Label::new(RichText::new(if self.preview.is_some() { "File preview" } else { title.as_str() }).heading()).truncate().sense(egui::Sense::click())).on_hover_text(format!("{title}\nClick to rename")).clicked() && self.preview.is_none() { rename = true; }
                     });
                     ui.add_enabled_ui(!self.run_pending, |ui| {
                         widgets::mode_pill(ui, &mut self.agent_mode, false, "Chat");
@@ -32,6 +33,7 @@ impl MoxiBoxApp {
                         if ui.checkbox(&mut auto, "Auto-approve").on_hover_text("Run edits, writes, commands, and memory notes without asking").changed() { self.set_auto_approve(auto); }
                     }
                 });
+                if rename { self.name_workspace(self.workspace_id); }
                 if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
                 ui.add_space(8.0);
                 // The preview header stays outside the scroll area so Return to chat is always reachable.

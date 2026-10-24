@@ -2,6 +2,14 @@ use super::*;
 
 pub(super) const DEFAULT_NAME: &str = "New workspace";
 
+fn valid_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err("Use a workspace name of 1–80 characters on one line.".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 fn folder_name(folder: &str) -> String {
     std::path::Path::new(folder)
         .file_name()
@@ -51,13 +59,37 @@ impl Store {
     }
 
     pub fn create_workspace(&self) -> Result<(), String> {
+        self.create_named_workspace("")
+    }
+
+    /// A blank name uses the default, which is replaced by the first message.
+    pub fn create_named_workspace(&self, name: &str) -> Result<(), String> {
+        let name = if name.trim().is_empty() {
+            DEFAULT_NAME.to_owned()
+        } else {
+            valid_name(name)?
+        };
         self.connection
             .execute(
                 "INSERT INTO conversations(workspace, title) VALUES('', ?1)",
-                [DEFAULT_NAME],
+                [name],
             )
             .map_err(|e| e.to_string())?;
         self.select(self.connection.last_insert_rowid())
+    }
+
+    pub fn rename_workspace(&self, id: i64, name: &str) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE conversations SET title=?1 WHERE id=?2",
+                params![valid_name(name)?, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return Err("That workspace no longer exists.".to_owned());
+        }
+        Ok(())
     }
 
     pub fn select(&self, id: i64) -> Result<(), String> {

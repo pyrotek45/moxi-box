@@ -81,6 +81,16 @@ pub fn label(name: &str, arguments: &Value, done: bool) -> String {
         "list_tasks" => verb("Check the task list", "Checked the task list"),
         "update_tasks" => verb("Update the task list", "Updated the task list"),
         "remember" => verb("Save a project note", "Saved a project note"),
+        "web_search" => format!(
+            "{} \"{}\"",
+            verb("Search the web for", "Searched the web for"),
+            arguments["query"].as_str().unwrap_or("")
+        ),
+        "fetch_url" => format!(
+            "{} {}",
+            verb("Open", "Read"),
+            arguments["url"].as_str().unwrap_or("a page")
+        ),
         _ => format!("{} {name}", verb("Use", "Used")),
     }
 }
@@ -248,7 +258,7 @@ pub fn preview(root: &str, path: &str) -> Result<String, String> {
     read_file(&canonical_root(root)?, path)
 }
 
-fn definition(name: &str, description: &str, parameters: Value) -> Value {
+pub fn definition(name: &str, description: &str, parameters: Value) -> Value {
     json!({"type":"function","function":{"name":name,"description":description,"parameters":parameters}})
 }
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
