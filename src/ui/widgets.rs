@@ -105,25 +105,47 @@ pub fn task_row(ui: &mut egui::Ui, task: &Task) -> Option<bool> {
                 ui.painter().circle_stroke(
                     rect.center(),
                     6.0,
-                    egui::Stroke::new(1.3, if task.complete { ACCENT } else { TEXT_MUTED }),
+                    egui::Stroke::new(
+                        1.3,
+                        if task.status == crate::domain::TaskStatus::Completed {
+                            ACCENT
+                        } else {
+                            TEXT_MUTED
+                        },
+                    ),
                 );
-                if task.complete {
+                if task.status == crate::domain::TaskStatus::Completed {
                     ui.painter().circle_filled(rect.center(), 3.0, ACCENT);
                 }
+                if task.status == crate::domain::TaskStatus::InProgress {
+                    ui.painter()
+                        .circle_filled(rect.center(), 3.0, Color32::LIGHT_YELLOW);
+                }
                 let label = ui.add(
-                    egui::Label::new(RichText::new(&task.title).color(if task.complete {
-                        TEXT_MUTED
-                    } else {
-                        Color32::from_gray(236)
-                    }))
+                    egui::Label::new(
+                        RichText::new(if task.status == crate::domain::TaskStatus::InProgress {
+                            format!("{} · in progress", task.title)
+                        } else {
+                            task.title.clone()
+                        })
+                        .color(
+                            if task.status == crate::domain::TaskStatus::Completed {
+                                TEXT_MUTED
+                            } else {
+                                Color32::from_gray(236)
+                            },
+                        ),
+                    )
                     .wrap()
                     .sense(egui::Sense::click()),
                 );
+                let label = label.on_hover_text(task.status.as_str());
                 response.clicked() || label.clicked()
             })
             .inner
         });
-    row.inner.then_some(!task.complete)
+    row.inner
+        .then_some(task.status != crate::domain::TaskStatus::Completed)
 }
 
 pub fn status_badge(ui: &mut egui::Ui, status: ProviderStatus) {

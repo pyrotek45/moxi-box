@@ -332,6 +332,10 @@ fn fail_run(store: &Store, events: &EventSender, error: String) {
 }
 
 fn sync_conversation(store: &Store, events: &EventSender) {
+    match store.tasks() {
+        Ok(tasks) => send(events, AppEvent::TasksUpdated(tasks)),
+        Err(error) => fail(events, error),
+    }
     match store.conversation_state() {
         Ok(state) => send(events, AppEvent::ConversationLoaded(state)),
         Err(error) => fail(events, error),

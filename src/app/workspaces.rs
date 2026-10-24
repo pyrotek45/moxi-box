@@ -114,6 +114,7 @@ impl MoxiBoxApp {
         self.settings.workspace_root = String::new();
         self.workspace_entries.clear();
         self.messages.clear();
+        self.tasks.clear();
         self.activity.clear();
         self.conversations.clear();
         self.conversation_id = None;

@@ -1,4 +1,5 @@
 mod conversations;
+mod tasks;
 
 use std::{
     cell::{Cell, RefCell},
@@ -14,7 +15,7 @@ use crate::domain::{
 
 const DATABASE_DIRECTORY: &str = "moxi-box";
 const DATABASE_FILENAME: &str = "moxi-box.sqlite";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     connection: Connection,
@@ -97,6 +98,7 @@ impl Store {
                 self.connection.execute("INSERT OR IGNORE INTO conversations (id, workspace, title) VALUES (1, ?1, 'Previous conversation')", [&workspace]).map_err(|e| e.to_string())?;
                 self.connection.execute_batch("ALTER TABLE messages ADD COLUMN conversation_id INTEGER NOT NULL DEFAULT 1;").map_err(|e| e.to_string())?;
             }
+            self.migrate_tasks()?;
             self.connection.execute_batch("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);").map_err(|e| e.to_string())?;
             self.connection
                 .execute("UPDATE schema_version SET version=?1", [SCHEMA_VERSION])
@@ -125,27 +127,6 @@ impl Store {
             .execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES ('application', ?1)",
                 [serialized],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    pub fn add_task(&self, title: &str) -> Result<Task, String> {
-        self.connection
-            .execute("INSERT INTO tasks (title) VALUES (?1)", [title])
-            .map_err(|error| error.to_string())?;
-        Ok(Task {
-            id: self.connection.last_insert_rowid(),
-            title: title.to_owned(),
-            complete: false,
-        })
-    }
-
-    pub fn set_task_complete(&self, id: i64, complete: bool) -> Result<(), String> {
-        self.connection
-            .execute(
-                "UPDATE tasks SET complete = ?1 WHERE id = ?2",
-                params![i64::from(complete), id],
             )
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -208,25 +189,6 @@ impl Store {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Settings::default()),
             Err(error) => Err(error.to_string()),
         }
-    }
-
-    fn tasks(&self) -> Result<Vec<Task>, String> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id, title, complete FROM tasks ORDER BY complete, id DESC")
-            .map_err(|error| error.to_string())?;
-        let tasks = statement
-            .query_map([], |row| {
-                Ok(Task {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    complete: row.get::<_, i64>(2)? != 0,
-                })
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        Ok(tasks)
     }
 
     fn messages(&self) -> Result<Vec<ChatMessage>, String> {
