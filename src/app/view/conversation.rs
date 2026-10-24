@@ -35,6 +35,7 @@ impl MoxiBoxApp {
                 });
                 if rename { self.name_workspace(self.workspace_id); }
                 if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
+                else if self.run_pending && self.activity_at.elapsed().as_secs() >= 5 { widgets::working_indicator(ui, &self.waiting_label("Working")); }
                 ui.add_space(8.0);
                 // The preview header stays outside the scroll area so Return to chat is always reachable.
                 if let Some((path, _)) = &self.preview {
@@ -79,7 +80,10 @@ impl MoxiBoxApp {
                             for message in self.messages.iter().enumerate().filter(|(index,message)| self.show_full_history || message.id > self.compacted_through || *index + 2 >= self.messages.len()).map(|(_,message)| message) {
                                 let streaming = self.streaming_id == Some(message.id);
                                 let steps = self.activity.iter().filter(|step| step.message_id == message.id).collect::<Vec<_>>();
-                                if steps.is_empty() {
+                                if steps.is_empty() && streaming && message.content.is_empty() {
+                                    let label = self.waiting_label("Thinking");
+                                    widgets::bubble(ui, message.id, message.role, |ui| widgets::working_indicator(ui, &label));
+                                } else if steps.is_empty() {
                                     widgets::message_bubble(ui, message, streaming);
                                 } else {
                                     widgets::bubble(ui, message.id, message.role, |ui| {
@@ -101,7 +105,7 @@ impl MoxiBoxApp {
                                         } else if streaming && self.approval.is_none() {
                                             ui.add_space(4.0);
                                             let running = steps.last().is_some_and(|step| step.running);
-                                            widgets::working_indicator(ui, if running { "Running tool" } else { "Thinking" });
+                                            widgets::working_indicator(ui, &self.waiting_label(if running { "Running tool" } else { "Thinking" }));
                                         }
                                     });
                                 }
