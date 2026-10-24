@@ -34,8 +34,12 @@ impl MoxiBoxApp {
                     }
                 });
                 if rename { self.name_workspace(self.workspace_id); }
-                if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
-                else if self.run_pending && self.activity_at.elapsed().as_secs() >= 5 { widgets::working_indicator(ui, &self.waiting_label("Working")); }
+                // A fixed slot: status text appearing or vanishing must not shift the conversation.
+                let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+                ui.scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
+                    if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
+                    else if self.run_pending && self.activity_at.elapsed().as_secs() >= 5 { widgets::working_indicator(ui, &self.waiting_label("Working")); }
+                });
                 ui.add_space(8.0);
                 // The preview header stays outside the scroll area so Return to chat is always reachable.
                 if let Some((path, _)) = &self.preview {
