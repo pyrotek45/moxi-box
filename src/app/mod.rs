@@ -59,9 +59,7 @@ pub struct MoxiBoxApp {
     workspace_error: Option<String>,
     workspace_pending: bool,
     workspace_name: String,
-    folder_entries: Vec<String>,
-    folder_request: u64,
-    folder_loading: bool,
+    folder_picker: Option<(WorkspaceDialog, Receiver<Option<std::path::PathBuf>>)>,
     history: PromptHistory,
     approval: Option<(String, String)>,
     activity: Vec<AgentActivity>,
@@ -111,9 +109,7 @@ impl MoxiBoxApp {
             workspace_error: None,
             workspace_pending: false,
             workspace_name: String::new(),
-            folder_entries: Vec::new(),
-            folder_request: 0,
-            folder_loading: false,
+            folder_picker: None,
             history: PromptHistory::default(),
             approval: None,
             activity: Vec::new(),
@@ -162,19 +158,6 @@ impl MoxiBoxApp {
                     self.models_loaded(request_id, result)
                 }
                 AppEvent::WorkspaceOpened(result) => self.workspace_opened(result),
-                AppEvent::FoldersListed { request_id, result } => {
-                    if request_id == self.folder_request {
-                        self.folder_loading = false;
-                        match result {
-                            Ok((path, entries)) => {
-                                self.workspace_path = path;
-                                self.folder_entries = entries;
-                                self.workspace_error = None;
-                            }
-                            Err(error) => self.workspace_error = Some(error),
-                        }
-                    }
-                }
                 AppEvent::ConnectionChanged(connected) => {
                     if !connected {
                         self.connection.disconnect();

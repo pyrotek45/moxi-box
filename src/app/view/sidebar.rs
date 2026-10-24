@@ -13,51 +13,56 @@ impl MoxiBoxApp {
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                         ui.label(RichText::new("WORKSPACE").small().color(TEXT_MUTED));
-                        ui.add_enabled_ui(!self.run_pending && !self.workspace_pending, |ui| {
-                            let mut selected = self.settings.workspace_root.clone();
-                            let name = std::path::Path::new(&selected)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("Choose workspace");
-                            egui::ComboBox::from_id_salt("workspace_picker")
-                                .width(ui.available_width())
-                                .selected_text(name)
-                                .truncate()
-                                .show_ui(ui, |ui| {
-                                    for root in &self.settings.workspaces {
-                                        let name = std::path::Path::new(root)
-                                            .file_name()
-                                            .and_then(|name| name.to_str())
-                                            .unwrap_or(root);
-                                        ui.selectable_value(&mut selected, root.clone(), name)
-                                            .on_hover_text(root);
+                        ui.add_enabled_ui(
+                            !self.run_pending
+                                && !self.workspace_pending
+                                && self.folder_picker.is_none(),
+                            |ui| {
+                                let mut selected = self.settings.workspace_root.clone();
+                                let name = std::path::Path::new(&selected)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("Choose workspace");
+                                egui::ComboBox::from_id_salt("workspace_picker")
+                                    .width(ui.available_width())
+                                    .selected_text(name)
+                                    .truncate()
+                                    .show_ui(ui, |ui| {
+                                        for root in &self.settings.workspaces {
+                                            let name = std::path::Path::new(root)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or(root);
+                                            ui.selectable_value(&mut selected, root.clone(), name)
+                                                .on_hover_text(root);
+                                        }
+                                    });
+                                if selected != self.settings.workspace_root {
+                                    self.open_workspace(selected, false);
+                                }
+                                ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.horizontal_wrapped(|ui| {
+                                    for (label, dialog) in [
+                                        ("New", crate::app::workspaces::WorkspaceDialog::New),
+                                        ("Open", crate::app::workspaces::WorkspaceDialog::Open),
+                                        ("Reset", crate::app::workspaces::WorkspaceDialog::Reset),
+                                        ("Delete", crate::app::workspaces::WorkspaceDialog::Remove),
+                                    ] {
+                                        if ui
+                                            .add_enabled(
+                                                !matches!(label, "Delete" | "Reset")
+                                                    || !self.settings.workspace_root.is_empty(),
+                                                widgets::secondary_button(label),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.show_workspace_dialog(dialog, context);
+                                        }
                                     }
                                 });
-                            if selected != self.settings.workspace_root {
-                                self.open_workspace(selected, false);
-                            }
-                            ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.horizontal_wrapped(|ui| {
-                                for (label, dialog) in [
-                                    ("New", crate::app::workspaces::WorkspaceDialog::New),
-                                    ("Open", crate::app::workspaces::WorkspaceDialog::Open),
-                                    ("Reset", crate::app::workspaces::WorkspaceDialog::Reset),
-                                    ("Delete", crate::app::workspaces::WorkspaceDialog::Remove),
-                                ] {
-                                    if ui
-                                        .add_enabled(
-                                            !matches!(label, "Delete" | "Reset")
-                                                || !self.settings.workspace_root.is_empty(),
-                                            widgets::secondary_button(label),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.show_workspace_dialog(dialog);
-                                    }
-                                }
-                            });
-                        });
+                            },
+                        );
                         if !self.settings.workspace_root.is_empty() {
                             ui.add(
                                 egui::Label::new(
