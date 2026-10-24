@@ -44,6 +44,7 @@ impl MoxiBoxApp {
                         save = ui.add(widgets::primary_button("Save")).clicked();
                         cancel = ui.add(widgets::secondary_button("Cancel")).clicked();
                     });
+                    save |= widgets::enter_pressed(ui);
                 });
             self.provider_draft = Some(draft.clone());
             if save {
