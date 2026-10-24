@@ -101,7 +101,11 @@ pub(super) fn run_agent(
             }
         }
         // Messages sent during the run steer it at this safe point, after a complete tool round.
-        let steering = take_steering(commands, deferred);
+        let steering = if response.tool_calls.is_empty() {
+            take_steering(commands, deferred)
+        } else {
+            String::new()
+        };
         if !steering.is_empty() {
             let Some((steer_id, reply_id)) = begin_run(store, events, &steering) else {
                 return;
