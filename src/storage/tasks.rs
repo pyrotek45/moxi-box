@@ -83,8 +83,9 @@ impl Store {
         struct Request {
             tasks: Vec<TaskDraft>,
         }
-        let request: Request = serde_json::from_value(arguments.clone())
-            .map_err(|e| format!("Invalid task list: {e}"))?;
+        let request: Request =
+            serde_json::from_value(normalize_task_arguments(arguments).map_err(task_error)?)
+                .map_err(task_error)?;
         if request.tasks.len() > 100 {
             return Err("Use at most 100 tasks.".into());
         }
@@ -115,6 +116,41 @@ impl Store {
         transaction.commit().map_err(|e| e.to_string())?;
         self.tasks()
     }
+}
+
+fn task_error(error: impl std::fmt::Display) -> String {
+    format!("Task list was NOT changed: {error}. Call update_tasks with actual data, for example {{\"tasks\":[{{\"title\":\"Inspect the code\",\"status\":\"in_progress\"}}]}}. Include all tasks to retain. Do not send a schema or required_fields. Valid statuses: pending, in_progress, completed. Correct the call before claiming the plan was updated.")
+}
+
+fn normalize_task_arguments(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn object(
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let fields = value.as_object().ok_or("Expected a JSON object")?;
+        let mut normalized = serde_json::Map::new();
+        for (key, value) in fields {
+            // Some small models include literal quotation marks in property names.
+            let key = key
+                .strip_prefix('"')
+                .and_then(|key| key.strip_suffix('"'))
+                .unwrap_or(key);
+            if normalized.insert(key.to_owned(), value.clone()).is_some() {
+                return Err(format!("Conflicting duplicate field: {key}"));
+            }
+        }
+        Ok(normalized)
+    }
+    let mut root = object(value)?;
+    let tasks = root
+        .get_mut("tasks")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("Missing tasks array; send task data, not a schema")?;
+    for task in tasks {
+        *task = serde_json::Value::Object(object(task)?);
+    }
+    // Harmless schema metadata may accompany a real list. Never derive tasks from it.
+    root.remove("required_fields");
+    Ok(serde_json::Value::Object(root))
 }
 
 fn validate_title(title: &str) -> Result<(), String> {
@@ -233,5 +269,32 @@ mod tests {
             assert_eq!(tasks[0].status, TaskStatus::InProgress);
         }
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod argument_recovery_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn quoted_keys_and_metadata_recover_without_changing_task_text() {
+        let store = Store::in_memory();
+        let tasks = store.replace_tasks(&json!({"tasks":[{"\"title\"":"Keep \"quotes\" in text", "\"status\"":"pending"}],"required_fields":["tasks"]})).unwrap();
+        assert_eq!(tasks[0].title, "Keep \"quotes\" in text");
+    }
+    #[test]
+    fn schema_only_and_conflicting_keys_preserve_existing_plan() {
+        let store = Store::in_memory();
+        store.add_task("Keep me").unwrap();
+        for arguments in [
+            json!({"required_fields":["tasks"]}),
+            json!({"tasks":[{"title":"one","\"title\"":"two","status":"pending"}]}),
+            json!({"tasks":[{"title":"bad","status":"unknown"}]}),
+        ] {
+            let error = store.replace_tasks(&arguments).unwrap_err();
+            assert!(error.contains("NOT changed"));
+            assert!(error.contains("in_progress"));
+            assert_eq!(store.tasks().unwrap()[0].title, "Keep me");
+        }
     }
 }
