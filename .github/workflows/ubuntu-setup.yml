@@ -1,0 +1,17 @@
+name: Ubuntu setup
+on:
+  push:
+    paths: ['scripts/setup-ubuntu.sh', 'Cargo.toml', 'Cargo.lock', '.github/workflows/ubuntu-setup.yml']
+  pull_request:
+    paths: ['scripts/setup-ubuntu.sh', 'Cargo.toml', 'Cargo.lock', '.github/workflows/ubuntu-setup.yml']
+permissions:
+  contents: read
+jobs:
+  setup-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup and compile
+        run: ./scripts/setup-ubuntu.sh --debug
+      - name: Test locked dependencies
+        run: cargo +1.90.0 test --locked --jobs 2
