@@ -76,3 +76,7 @@ Task metadata updates need no approval. File changes, commands, and memory still
 Queued messages wait until the current tool sequence has finished, giving the agent a chance to recover from failed edits before starting the next request. Stop still cancels immediately. `replace_all` replaces all literal matches in one file with approval; missing matches leave the file unchanged. `update_tasks` replaces the whole list, so the agent must include existing tasks it wants to retain; it does not append.
 
 Chat bubbles render CommonMark formatting, including headings, emphasis, lists, links, quotes, tables, and fenced code with a copy button. Wide content scrolls horizontally within the bubble. Automatic image loading is disabled.
+
+Use the top-right Settings gear for folder attachment, creation, detachment, reset, and workspace memory. The sidebar retains workspace navigation, files, and tasks.
+
+The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.

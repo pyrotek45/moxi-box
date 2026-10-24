@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::workspaces::{FolderPick, WorkspaceDialog};
+use crate::app::workspaces::WorkspaceDialog;
 
 impl MoxiBoxApp {
     pub(super) fn sidebar(&mut self, context: &egui::Context) {
@@ -53,77 +53,7 @@ impl MoxiBoxApp {
                                     }
                                 }
                             });
-                        ui.add_space(12.0);
-                        ui.label(RichText::new("FOLDER").small().color(TEXT_MUTED));
-                        ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
-                        ui.spacing_mut().item_spacing.x = 6.0;
                         let folder = self.settings.workspace_root.clone();
-                        if folder.is_empty() {
-                            ui.label(
-                                RichText::new(
-                                    "Attach a folder so the agent can read and edit files.",
-                                )
-                                .small()
-                                .color(TEXT_MUTED),
-                            );
-                        } else {
-                            ui.add(egui::Label::new(RichText::new(&folder).small()).truncate())
-                                .on_hover_text(&folder);
-                        }
-                        ui.add_enabled_ui(idle, |ui| {
-                            ui.menu_button("Workspace settings", |ui| {
-                                let attach = if folder.is_empty() {
-                                    "Attach"
-                                } else {
-                                    "Change"
-                                };
-                                if ui
-                                    .add(widgets::secondary_button(attach))
-                                    .on_hover_text("Choose an existing folder")
-                                    .clicked()
-                                {
-                                    self.pick_folder(FolderPick::Attach, context);
-                                    ui.close_menu();
-                                }
-                                if folder.is_empty() {
-                                    if ui
-                                        .add(widgets::secondary_button("New folder"))
-                                        .on_hover_text("Create a folder and attach it")
-                                        .clicked()
-                                    {
-                                        self.pick_folder(FolderPick::NewFolderParent, context);
-                                    }
-                                } else {
-                                    if ui
-                                        .add(widgets::secondary_button("Detach"))
-                                        .on_hover_text(
-                                            "Stop working in this folder; files stay on disk",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.attach_folder(String::new(), false);
-                                        ui.close_menu();
-                                    }
-                                    if ui
-                                        .add(widgets::secondary_button("Reset"))
-                                        .on_hover_text("Archive this folder and recreate it empty")
-                                        .clicked()
-                                    {
-                                        self.workspace_name.clear();
-                                        self.workspace_error = None;
-                                        self.workspace_dialog = Some(WorkspaceDialog::Reset);
-                                    }
-                                }
-                                if ui
-                                    .add(widgets::secondary_button("Memory"))
-                                    .on_hover_text("Notes the model keeps for this workspace")
-                                    .clicked()
-                                {
-                                    self.memory_draft = Some(self.memory.clone());
-                                    ui.close_menu();
-                                }
-                            });
-                        });
                         if !folder.is_empty() {
                             ui.add_space(12.0);
                             ui.label(RichText::new("FILES").small().color(TEXT_MUTED));

@@ -14,9 +14,23 @@ impl MoxiBoxApp {
                 ui.heading("Settings");
                 ui.add_space(8.0);
                 ScrollArea::vertical().id_salt("settings_body").max_height(height - 60.0).show(ui, |ui| {
+                    ui.label(RichText::new("WORKSPACE FOLDER").small().color(TEXT_MUTED));
+                    ui.add(egui::Label::new(if self.settings.workspace_root.is_empty() { "No folder attached" } else { &self.settings.workspace_root }).wrap());
+                    ui.add_enabled_ui(self.idle(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Attach / change").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::Attach, context); close = true; }
+                            if ui.button("New folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::NewFolderParent, context); close = true; }
+                            if !self.settings.workspace_root.is_empty() {
+                                if ui.button("Detach").clicked() { self.attach_folder(String::new(), false); }
+                                if ui.button("Reset folder").clicked() { self.workspace_name.clear(); self.workspace_error = None; self.workspace_dialog = Some(crate::app::workspaces::WorkspaceDialog::Reset); close = true; }
+                            }
+                            if ui.button("Workspace memory").clicked() { self.memory_draft = Some(self.memory.clone()); close = true; }
+                        });
+                    });
+                    ui.add_space(12.0);
                     ui.label(RichText::new("AGENT").small().color(TEXT_MUTED));
                     let mut auto = self.auto_approve.load(std::sync::atomic::Ordering::Acquire);
-                    if ui.checkbox(&mut auto, "Auto-approve edits, writes, commands, and memory notes").changed() {
+                    if ui.checkbox(&mut auto, "Auto-approve edits, writes, deletions, commands, and memory notes").changed() {
                         self.set_auto_approve(auto);
                     }
                     ui.label(RichText::new("Off by default and reset at launch. Commands run with your permissions; the workspace folder is not a sandbox.").small().color(TEXT_MUTED));
@@ -34,6 +48,7 @@ impl MoxiBoxApp {
                     for (name, help) in [
                         ("list_files / read_file / search_content", "Explore the workspace. Automatic."),
                         ("edit_file / write_file", "Change or create files. Shows a diff; needs approval."),
+                        ("delete_path", "Permanently delete a file or folder. Nonempty folders require recursive=true. Needs approval."),
                         ("run_command", "Build, test, git, move or delete files. Needs approval."),
                         ("list_tasks / update_tasks", "Plan multi-step work in the sidebar task list. Automatic."),
                         ("remember", "Save a project note to workspace memory. Needs approval."),
@@ -50,7 +65,7 @@ impl MoxiBoxApp {
                     ui.label(RichText::new("Workspaces, memory, tasks, and crash.log live here.").small().color(TEXT_MUTED));
                 });
                 ui.add_space(12.0);
-                close = ui.add(widgets::primary_button("Done")).clicked() || widgets::enter_pressed(ui);
+                close |= ui.add(widgets::primary_button("Done")).clicked() || widgets::enter_pressed(ui);
             });
         if open_provider {
             self.provider_draft = Some(self.settings.clone());
