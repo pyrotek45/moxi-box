@@ -13,20 +13,21 @@ A server running on your laptop is not automatically reachable from a cloud mach
 
 ## Using the toolbelt
 
-Click **Toolbelt** beside Chat/Agent for the in-app guide. Use a model with tool-calling support. Describe the result you want; you do not need to write tool-call JSON.
+The cog in the header opens **Settings**: Auto-approve, provider and context budget, a tool guide, and the data folder. Use a model with tool-calling support. Describe the result you want; you do not need to write tool-call JSON.
 
 Example: “Find where settings are loaded, explain it, then add validation and run the tests.”
 
 | Tool | What it does | Approval |
 | --- | --- | --- |
-| `list_files` | Lists workspace filenames. | Automatic |
+| `list_files` | Lists files and folders recursively, or one subfolder. | Automatic |
 | `read_file` | Reads numbered lines; optional `start_line` and `max_lines` let the model request ranges. Files are limited to 256 KiB. | Automatic |
-| `search_content` | Finds matching lines in workspace text files. | Automatic |
-| `write_file` | Creates or replaces a workspace file. | Required |
-| `run_command` | Runs an executable and arguments from the workspace directory. | Required |
+| `search_content` | Finds matching lines, optionally in one folder or file and ignoring case. | Automatic |
+| `edit_file` | Replaces one exact passage in an existing file; shown as a diff. | Required |
+| `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
+| `run_command` | Runs a program from the workspace root; use `sh -c` for pipes and `&&`. | Required |
 | `remember` | Appends a concise project fact to workspace memory. | Required |
 
-Tool steps appear live in the chat. Expand a step to see its arguments or output. Inspect a requested operation before approving it. Approve runs that operation once; Deny stops the run. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
+Tool steps appear live in the reply, in order, with plain titles such as "Read src/main.rs" or "Edited src/app.rs". Expand a step to see its result; edits show a red/green diff. Approve runs an operation once; Deny stops the run. **Auto-approve** (Agent mode header or Settings) runs edits, writes, commands, and memory notes without asking for the rest of the session. Send while Moxi works to queue a message: the agent reads it after its current tool round. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
 
 File tools reject traversal and symlink escapes. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Command output and model-facing tool observations are capped to keep memory and context bounded. Agent runs stop after sixteen model/tool rounds; send a follow-up to continue.
 

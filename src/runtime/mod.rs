@@ -34,6 +34,7 @@ impl EventSender {
 pub(super) struct AgentRequest {
     settings: Settings,
     content: String,
+    auto_approve: std::sync::Arc<AtomicBool>,
 }
 
 pub fn start(
@@ -64,19 +65,45 @@ pub fn start(
                     return;
                 }
             };
+            match store.recover_interrupted_run() {
+                Ok(true) => send(
+                    &event_sender,
+                    AppEvent::Notice(
+                        "Recovered from an unexpected shutdown. The unfinished run is marked interrupted."
+                            .to_owned(),
+                    ),
+                ),
+                Ok(false) => {}
+                Err(error) => fail(&event_sender, error),
+            }
             let mut deferred = VecDeque::new();
             while let Some(command) = deferred
                 .pop_front()
                 .or_else(|| command_receiver.recv().ok())
             {
-                handle(
-                    command,
-                    &store,
-                    &runtime,
-                    &event_sender,
-                    &command_receiver,
-                    &mut deferred,
-                );
+                let running = matches!(command, AppCommand::SendChat { .. });
+                // A bug in one command must not take down the worker; SQLite keeps data consistent.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle(
+                        command,
+                        &store,
+                        &runtime,
+                        &event_sender,
+                        &command_receiver,
+                        &mut deferred,
+                    )
+                }));
+                if outcome.is_err() {
+                    let error = "Internal error; the action was stopped. Details are in crash.log beside the database.".to_owned();
+                    if running {
+                        fail_run(&store, &event_sender, error);
+                    } else {
+                        fail(&event_sender, error);
+                    }
+                }
+                if running {
+                    let _ = store.set_active_run(None);
+                }
             }
         })
         .expect("backend worker thread should start");
@@ -165,10 +192,11 @@ fn handle(
                 sync_conversation(store, events);
             }
         }
-        AppCommand::BrowseWorkspace { root } => match tools::workspace_entries(&root) {
-            Ok(entries) => send(events, AppEvent::WorkspaceLoaded(entries)),
-            Err(error) => fail(events, error),
-        },
+        // Periodic and quiet: a folder that vanished shows as empty rather than spamming notices.
+        AppCommand::BrowseWorkspace { root } => send(
+            events,
+            AppEvent::WorkspaceLoaded(tools::workspace_entries(&root).unwrap_or_default()),
+        ),
         AppCommand::ReadPreview { root, path } => match tools::preview(&root, &path) {
             Ok(content) => send(events, AppEvent::PreviewLoaded { path, content }),
             Err(error) => fail(events, error),
@@ -190,8 +218,13 @@ fn handle(
             settings,
             content,
             agent_mode,
+            auto_approve,
             cancelled,
         } => {
+            // Queued behind a run the user stopped.
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
             if agent_mode {
                 agent::run_agent(
                     store,
@@ -199,15 +232,54 @@ fn handle(
                     events,
                     commands,
                     deferred,
-                    AgentRequest { settings, content },
+                    AgentRequest {
+                        settings,
+                        content,
+                        auto_approve,
+                    },
                     &cancelled,
                 )
             } else {
                 send_chat(store, runtime, events, settings, content, &cancelled)
             }
         }
-        AppCommand::ResolveApproval { .. } => {
-            fail(events, "No tool operation is awaiting approval.".to_owned())
+        // A late click after the run ended or was stopped has nothing left to resolve.
+        AppCommand::ResolveApproval { .. } => {}
+    }
+}
+
+/// Save the user message and an empty reply placeholder; returns (user_id, reply_id).
+fn begin_run(store: &Store, events: &EventSender, content: &str) -> Option<(i64, i64)> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let user_id = match store.add_message(MessageRole::User, content) {
+        Ok(id) => id,
+        Err(error) => {
+            send(events, AppEvent::RunFailed(error));
+            return None;
+        }
+    };
+    send(
+        events,
+        AppEvent::ChatUser(crate::domain::ChatMessage {
+            id: user_id,
+            role: MessageRole::User,
+            content: content.to_owned(),
+        }),
+    );
+    match store
+        .add_message(MessageRole::Assistant, "")
+        .and_then(|id| store.set_active_run(Some(id)).map(|()| id))
+    {
+        Ok(reply_id) => {
+            send(events, AppEvent::ChatStarted { id: reply_id });
+            Some((user_id, reply_id))
+        }
+        Err(error) => {
+            fail_run(store, events, error);
+            None
         }
     }
 }
@@ -216,90 +288,54 @@ fn send_chat(
     store: &Store,
     runtime: &Runtime,
     events: &EventSender,
-    settings: crate::domain::Settings,
+    settings: Settings,
     content: String,
     cancelled: &AtomicBool,
 ) {
-    if content.trim().is_empty() {
+    let Some((_, reply_id)) = begin_run(store, events, &content) else {
         return;
-    }
-    let user_id = match store.add_message(MessageRole::User, content.trim()) {
-        Ok(id) => id,
-        Err(error) => {
-            send(events, AppEvent::RunFailed(error));
-            return;
-        }
     };
-    send(
-        events,
-        AppEvent::ChatUser(crate::domain::ChatMessage {
-            id: user_id,
-            role: MessageRole::User,
-            content: content.trim().to_owned(),
-        }),
-    );
-    let assistant_id = match store.add_message(MessageRole::Assistant, "") {
-        Ok(id) => id,
-        Err(error) => {
-            fail_run(store, events, error);
-            return;
-        }
-    };
-    send(events, AppEvent::ChatStarted { id: assistant_id });
-    let history = match context::prepare(store, runtime, &settings, events, cancelled) {
-        Ok(messages) => messages,
-        Err(error) => {
-            fail_run(store, events, error);
-            return;
-        }
+    let messages = match context::prepare(store, runtime, &settings, events, cancelled) {
+        Ok(history) => lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history),
+        Err(error) => return fail_run(store, events, error),
     };
     let mut partial = String::new();
     let mut checkpoint = std::time::Instant::now();
     let mut checkpoint_error = None;
     let result = runtime.block_on(lm_studio::stream_chat(
         &settings,
-        &history,
+        &messages,
         cancelled,
         |text| {
             partial.push_str(&text);
             if checkpoint.elapsed() >= std::time::Duration::from_millis(250) {
-                if let Err(error) = store.replace_message_content(assistant_id, &partial) {
+                if let Err(error) = store.replace_message_content(reply_id, &partial) {
                     checkpoint_error = Some(error);
                 }
                 checkpoint = std::time::Instant::now();
             }
-            send(
-                events,
-                AppEvent::ChatDelta {
-                    id: assistant_id,
-                    text,
-                },
-            )
+            send(events, AppEvent::ChatDelta { id: reply_id, text })
         },
     ));
-    if let Err(error) = store.replace_message_content(assistant_id, &partial) {
-        fail_run(store, events, error);
-        return;
-    }
-    if let Some(error) = checkpoint_error {
-        fail_run(store, events, error);
-        return;
+    if let Some(error) = store
+        .replace_message_content(reply_id, &partial)
+        .err()
+        .or(checkpoint_error)
+    {
+        return fail_run(store, events, error);
     }
     match result {
-        Ok(content) => match store.replace_message_content(assistant_id, &content) {
-            Ok(()) => {
-                send(events, AppEvent::ConnectionChanged(true));
-                send(events, AppEvent::ChatFinished { id: assistant_id });
-            }
-            Err(error) => fail_run(store, events, error),
-        },
-        Err(error) => {
-            if !cancelled.load(Ordering::Acquire) {
-                send(events, AppEvent::ConnectionChanged(false));
-            }
-            fail_run(store, events, error);
-        }
+        Ok(_) => send(events, AppEvent::ChatFinished { id: reply_id }),
+        Err(error) => provider_failed(store, events, cancelled, error),
     }
+}
+
+/// Only a transport failure means the provider is gone; an HTTP error proves it answered.
+fn provider_failed(store: &Store, events: &EventSender, cancelled: &AtomicBool, error: String) {
+    if !cancelled.load(Ordering::Acquire) && lm_studio::is_unreachable(&error) {
+        send(events, AppEvent::ProviderUnreachable);
+    }
+    fail_run(store, events, error);
 }
 
 fn send(events: &EventSender, event: AppEvent) {

@@ -3,7 +3,7 @@ use crate::app::workspaces::WorkspaceDialog;
 
 mod memory;
 mod provider;
-mod toolbelt;
+mod settings;
 mod workspace;
 
 impl MoxiBoxApp {
@@ -13,6 +13,6 @@ impl MoxiBoxApp {
         self.provider_dialog(context, width, height);
         self.workspace_dialog(context, width, height);
         self.memory_dialog(context, width, height);
-        self.toolbelt_dialog(context, width, height);
+        self.settings_dialog(context, width, height);
     }
 }
