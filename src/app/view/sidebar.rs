@@ -71,7 +71,7 @@ impl MoxiBoxApp {
                                 .on_hover_text(&folder);
                         }
                         ui.add_enabled_ui(idle, |ui| {
-                            ui.horizontal_wrapped(|ui| {
+                            ui.menu_button("Workspace settings", |ui| {
                                 let attach = if folder.is_empty() {
                                     "Attach"
                                 } else {
@@ -83,6 +83,7 @@ impl MoxiBoxApp {
                                     .clicked()
                                 {
                                     self.pick_folder(FolderPick::Attach, context);
+                                    ui.close_menu();
                                 }
                                 if folder.is_empty() {
                                     if ui
@@ -101,6 +102,7 @@ impl MoxiBoxApp {
                                         .clicked()
                                     {
                                         self.attach_folder(String::new(), false);
+                                        ui.close_menu();
                                     }
                                     if ui
                                         .add(widgets::secondary_button("Reset"))
@@ -118,6 +120,7 @@ impl MoxiBoxApp {
                                     .clicked()
                                 {
                                     self.memory_draft = Some(self.memory.clone());
+                                    ui.close_menu();
                                 }
                             });
                         });
