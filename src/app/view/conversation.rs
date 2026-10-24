@@ -38,7 +38,7 @@ impl MoxiBoxApp {
                 let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
                 ui.scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
                     if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
-                    else if self.run_pending && self.activity_at.elapsed().as_secs() >= 5 { widgets::working_indicator(ui, &self.waiting_label("Working")); }
+                    else if self.run_pending { widgets::working_indicator(ui, &self.waiting_label("Working")); }
                 });
                 ui.add_space(8.0);
                 // The preview header stays outside the scroll area so Return to chat is always reachable.
@@ -106,7 +106,8 @@ impl MoxiBoxApp {
                                         if !content[start..].trim().is_empty() {
                                             ui.add_space(4.0);
                                             ui.push_id("text_end", |ui| widgets::message_text(ui, &content[start..]));
-                                        } else if streaming && self.approval.is_none() {
+                                        }
+                                        if streaming && self.approval.is_none() {
                                             ui.add_space(4.0);
                                             let running = steps.last().is_some_and(|step| step.running);
                                             widgets::working_indicator(ui, &self.waiting_label(if running { "Running tool" } else { "Thinking" }));

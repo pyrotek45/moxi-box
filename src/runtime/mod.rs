@@ -40,11 +40,40 @@ pub(super) struct AgentRequest {
 pub fn start(
     command_receiver: Receiver<AppCommand>,
     event_sender: Sender<AppEvent>,
-    wake: impl Fn() + Send + 'static,
+    wake: impl Fn() + Send + Sync + 'static,
 ) {
+    // Route read-only browsing independently of the long-running inference worker.
+    let wake = std::sync::Arc::new(wake);
+    let browse_wake = wake.clone();
+    let browse_events = event_sender.clone();
+    let (backend_sender, backend_receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(command) = command_receiver.recv() {
+            let event = match command {
+                AppCommand::ReadPreview { root, path } => match tools::preview(&root, &path) {
+                    Ok(content) => AppEvent::PreviewLoaded { path, content },
+                    Err(error) => AppEvent::Notice(error),
+                },
+                AppCommand::BrowseWorkspace { root } => {
+                    AppEvent::WorkspaceLoaded(tools::workspace_entries(&root).unwrap_or_default())
+                }
+                command => {
+                    if backend_sender.send(command).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            if browse_events.send(event).is_err() {
+                break;
+            }
+            browse_wake();
+        }
+    });
+    let command_receiver = backend_receiver;
     let event_sender = EventSender {
         channel: event_sender,
-        wake: Box::new(wake),
+        wake: Box::new(move || wake()),
     };
     thread::Builder::new()
         .name("moxi-box-backend".to_owned())
