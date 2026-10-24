@@ -16,6 +16,8 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
     vec![
+        definition("grep", "Search workspace text with a regular expression. Returns path:line:text. Optional include is a glob such as **/*.rs. Scans at most 500 tree entries and returns at most 50 matches; files over 256 KiB are skipped.", json!({"type":"object","properties":{"pattern":{"type":"string"},"include":{"type":"string"},"ignore_case":{"type":"boolean"}},"required":["pattern"]})),
+        definition("glob", "Find workspace files by glob pattern, for example **/*.py. Scans at most 500 tree entries. Skips symlinks and generated directories.", json!({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]})),
         definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("replace_all", "Replace every literal occurrence of old_text in one workspace file. Requires approval. Read the file first; no regex. Fails without changes when no match exists.", json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
@@ -242,6 +244,7 @@ pub fn execute(
             required_string(arguments, "path")?,
             required_string(arguments, "content")?,
         ),
+        "grep" | "glob" => discover(&root, name, arguments),
         "delete_path" => delete_path(
             &root,
             required_string(arguments, "path")?,
@@ -259,9 +262,9 @@ pub fn execute(
         ),
         "edit_file" => edit_file(
             &root,
-            required_string(arguments, "path")?,
-            required_string(arguments, "old_text")?,
-            required_string(arguments, "new_text")?,
+            edit_argument(arguments, "path", &["filePath", "file_path"])?,
+            edit_argument(arguments, "old_text", &["oldString", "old_string"])?,
+            edit_argument(arguments, "new_text", &["newString", "new_string"])?,
         ),
         "run_command" => run_command(
             &root,
@@ -512,6 +515,67 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         path.strip_prefix(root).unwrap_or(&path).display()
     ))
 }
+fn discover(root: &Path, name: &str, arguments: &Value) -> Result<String, String> {
+    let pattern = required_string(arguments, "pattern")?;
+    if pattern.is_empty() || pattern.len() > 2000 {
+        return Err("Use a pattern of 1–2000 bytes.".into());
+    }
+    let filter = glob::Pattern::new(if name == "glob" {
+        pattern
+    } else {
+        arguments["include"].as_str().unwrap_or("**/*")
+    })
+    .map_err(|e| e.to_string())?;
+    let regex = if name == "grep" {
+        Some(
+            regex::RegexBuilder::new(pattern)
+                .case_insensitive(arguments["ignore_case"].as_bool().unwrap_or(false))
+                .size_limit(1024 * 1024)
+                .build()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let entries = workspace_entries(root.to_str().ok_or("Invalid workspace path")?)?;
+    let mut output = Vec::new();
+    for entry in &entries {
+        if entry.is_directory || !filter.matches(&entry.path) {
+            continue;
+        }
+        if let Some(regex) = &regex {
+            if let Ok(text) = read_file(root, &entry.path) {
+                for (line, text) in text.lines().enumerate() {
+                    if regex.is_match(text) {
+                        output.push(format!(
+                            "{}:{}: {}",
+                            entry.path,
+                            line + 1,
+                            text.chars().take(500).collect::<String>()
+                        ));
+                    }
+                    if output.len() >= 50 {
+                        break;
+                    }
+                }
+            }
+        } else {
+            output.push(entry.path.clone());
+        }
+        if output.len() >= 50 {
+            break;
+        }
+    }
+    let capped = output.len() >= 50 || entries.len() >= MAX_TREE_ENTRIES;
+    if output.is_empty() {
+        output.push("No matches in scanned files.".into());
+    }
+    if capped {
+        output.push("[Scan/result limit reached; results may be incomplete.]".into());
+    }
+    Ok(output.join("\n"))
+}
+
 fn delete_path(root: &Path, path: &str, recursive: bool) -> Result<String, String> {
     let target = safe_path(root, path, false)?;
     if target == root {
@@ -559,11 +623,61 @@ fn replace_all(root: &Path, path: &str, old: &str, new: &str) -> Result<String, 
     Ok(format!("Replaced {count} occurrences in {path}."))
 }
 
+fn strip_line_numbers(text: &str) -> Option<String> {
+    let lines = text
+        .lines()
+        .map(|line| {
+            let (number, content) = line.split_once(": ")?;
+            if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Some(content)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if lines.is_empty() {
+        return None;
+    }
+    let mut result = lines.join("\n");
+    if text.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
+fn edit_argument<'a>(
+    arguments: &'a Value,
+    name: &str,
+    aliases: &[&str],
+) -> Result<&'a str, String> {
+    let mut selected = None;
+    for key in std::iter::once(name).chain(aliases.iter().copied()) {
+        if let Some(value) = arguments.get(key) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("{key} must be a string"))?;
+            if selected.is_some_and(|previous| previous != value) {
+                return Err(format!("Conflicting values for {name}"));
+            }
+            selected = Some(value);
+        }
+    }
+    selected.ok_or_else(|| {
+        format!("Missing {name}. Use edit_file with path, old_text, new_text. Read the file first.")
+    })
+}
+
 fn edit_file(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
     if old.is_empty() {
         return Err("old_text must not be empty. Use write_file to create a file.".to_owned());
     }
     let text = read_file(root, path)?;
+    // Recover copied read_file line prefixes only when the original text does not match.
+    let stripped = if !text.contains(old) {
+        strip_line_numbers(old)
+    } else {
+        None
+    };
+    let old = stripped.as_deref().unwrap_or(old);
     // Models send \n line endings; match files saved with \r\n too.
     let (old, new) = if !text.contains(old) && text.contains("\r\n") {
         (old.replace('\n', "\r\n"), new.replace('\n', "\r\n"))
@@ -1049,5 +1163,46 @@ mod command_failure_tests {
         let error = result.unwrap_err();
         assert!(error.contains("127"));
         assert!(error.contains("failure"));
+    }
+}
+
+#[cfg(test)]
+mod discovery_edit_tests {
+    use super::*;
+    #[test]
+    fn edit_aliases_are_supported_but_conflicts_rejected() {
+        assert_eq!(
+            strip_line_numbers("1: fn main() {}\n2: end"),
+            Some("fn main() {}\nend".into())
+        );
+        assert!(strip_line_numbers("1: first\nunprefixed").is_none());
+        assert_eq!(
+            edit_argument(&json!({"oldString":"abc"}), "old_text", &["oldString"]).unwrap(),
+            "abc"
+        );
+        assert!(edit_argument(
+            &json!({"old_text":"abc","oldString":"def"}),
+            "old_text",
+            &["oldString"]
+        )
+        .is_err());
+    }
+    #[test]
+    fn grep_regex_and_glob_discover_nested_files() {
+        let root = std::env::temp_dir().join(format!("moxi-discovery-{}", std::process::id()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\nlet value = 1;\n").unwrap();
+        let result = discover(
+            &root,
+            "grep",
+            &json!({"pattern":"^fn\\s+", "include":"**/*.rs"}),
+        )
+        .unwrap();
+        assert!(result.contains("src/main.rs:1:"));
+        assert!(discover(&root, "glob", &json!({"pattern":"**/*.rs"}))
+            .unwrap()
+            .contains("src/main.rs"));
+        assert!(discover(&root, "grep", &json!({"pattern":"["})).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }
