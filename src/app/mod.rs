@@ -365,7 +365,9 @@ impl MoxiBoxApp {
     /// Counts seconds since the model last sent anything, so slow is distinguishable from stuck.
     fn waiting_label(&self, base: &str) -> String {
         match self.activity_at.elapsed().as_secs() {
-            seconds if seconds >= 5 => format!("{base} · no output for {seconds}s"),
+            seconds if seconds >= 5 => {
+                format!("{base} · nothing received from the model for {seconds}s")
+            }
             _ => base.to_owned(),
         }
     }

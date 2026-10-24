@@ -400,7 +400,7 @@ fn waiting_label_reports_silence_not_total_time() {
     app.activity_at = std::time::Instant::now() - std::time::Duration::from_secs(42);
     assert_eq!(
         app.waiting_label("Thinking"),
-        "Thinking · no output for 42s"
+        "Thinking · nothing received from the model for 42s"
     );
     // Any streamed output, visible or not, resets the silence timer.
     tx.send(AppEvent::RunProgress).unwrap();
