@@ -40,7 +40,7 @@ pub fn run() -> eframe::Result<()> {
 pub struct MoxiBoxApp {
     commands: Sender<AppCommand>,
     cancelled: Arc<AtomicBool>,
-    show_toolbelt: bool,
+    show_settings: bool,
     events: Receiver<AppEvent>,
     settings: Settings,
     models: Vec<String>,
@@ -61,7 +61,9 @@ pub struct MoxiBoxApp {
     workspace_name: String,
     folder_picker: Option<(WorkspaceDialog, Receiver<Option<std::path::PathBuf>>)>,
     history: PromptHistory,
-    approval: Option<(String, String)>,
+    /// (request id, summary, preview) of the tool call awaiting approval.
+    approval: Option<(String, String, String)>,
+    auto_approve: Arc<AtomicBool>,
     activity: Vec<AgentActivity>,
     conversations: Vec<Conversation>,
     conversation_id: Option<i64>,
@@ -72,9 +74,16 @@ pub struct MoxiBoxApp {
     memory: String,
     memory_draft: Option<String>,
     workspace_entries: Vec<WorkspaceEntry>,
+    expanded_folders: std::collections::HashSet<String>,
     preview: Option<(String, String)>,
     run_pending: bool,
     show_workspace: bool,
+    worker_lost: bool,
+    /// Messages sent during a run, shown until the worker picks them up.
+    queued: std::collections::VecDeque<String>,
+    /// When the file tree was last requested; it is re-scanned periodically to follow outside changes.
+    tree_requested: std::time::Instant,
+    tree_pending: bool,
 }
 
 impl MoxiBoxApp {
@@ -90,7 +99,7 @@ impl MoxiBoxApp {
         let app = Self {
             commands: command_sender,
             cancelled,
-            show_toolbelt: false,
+            show_settings: false,
             events: event_receiver,
             settings: Settings::default(),
             models: Vec::new(),
@@ -112,6 +121,7 @@ impl MoxiBoxApp {
             folder_picker: None,
             history: PromptHistory::default(),
             approval: None,
+            auto_approve: Arc::new(AtomicBool::new(false)),
             activity: Vec::new(),
             conversations: Vec::new(),
             conversation_id: None,
@@ -122,9 +132,14 @@ impl MoxiBoxApp {
             memory: String::new(),
             memory_draft: None,
             workspace_entries: Vec::new(),
+            expanded_folders: Default::default(),
             preview: None,
             run_pending: false,
             show_workspace: true,
+            worker_lost: false,
+            queued: Default::default(),
+            tree_requested: std::time::Instant::now(),
+            tree_pending: false,
         };
         app.command(AppCommand::Load);
         app
@@ -135,7 +150,21 @@ impl MoxiBoxApp {
     }
 
     fn handle_events(&mut self, context: &egui::Context) {
-        while let Ok(event) = self.events.try_recv() {
+        loop {
+            let event = match self.events.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if self.run_pending || !self.worker_lost {
+                        self.worker_lost = true;
+                        self.run_pending = false;
+                        self.streaming_id = None;
+                        self.approval = None;
+                        self.notice = Some("The background worker stopped. Your conversations are saved; restart Moxi Box to continue.".to_owned());
+                    }
+                    break;
+                }
+            };
             match event {
                 AppEvent::Loaded {
                     settings,
@@ -158,14 +187,23 @@ impl MoxiBoxApp {
                     self.models_loaded(request_id, result)
                 }
                 AppEvent::WorkspaceOpened(result) => self.workspace_opened(result),
-                AppEvent::ConnectionChanged(connected) => {
-                    if !connected {
-                        self.connection.disconnect();
-                    }
+                AppEvent::ProviderUnreachable => self.connection.disconnect(),
+                AppEvent::WorkspaceLoaded(entries) => {
+                    self.tree_pending = false;
+                    self.workspace_entries = entries;
                 }
-                AppEvent::WorkspaceLoaded(entries) => self.workspace_entries = entries,
                 AppEvent::PreviewLoaded { path, content } => self.preview = Some((path, content)),
-                AppEvent::ChatUser(message) => self.messages.push(message),
+                AppEvent::ChatUser(message) => {
+                    // Several queued messages may arrive combined into one turn.
+                    while self
+                        .queued
+                        .front()
+                        .is_some_and(|queued| message.content.contains(queued.as_str()))
+                    {
+                        self.queued.pop_front();
+                    }
+                    self.messages.push(message);
+                }
                 AppEvent::ChatStarted { id } => {
                     self.messages.push(ChatMessage {
                         id,
@@ -228,9 +266,10 @@ impl MoxiBoxApp {
                 AppEvent::ApprovalRequested {
                     request_id,
                     summary,
+                    preview,
                 } => {
                     self.preview = None;
-                    self.approval = Some((request_id, summary));
+                    self.approval = Some((request_id, summary, preview));
                 }
                 AppEvent::TasksUpdated(tasks) => self.tasks = tasks,
                 AppEvent::TaskAdded(task) => self.tasks.push(task),
@@ -264,11 +303,7 @@ impl MoxiBoxApp {
     }
 
     fn send_message(&mut self) {
-        if self.run_pending
-            || self.conversation_pending
-            || self.workspace_pending
-            || self.composer.trim().is_empty()
-        {
+        if self.conversation_pending || self.workspace_pending || self.composer.trim().is_empty() {
             return;
         }
         if self.settings.workspace_root.is_empty() || self.conversation_id.is_none() {
@@ -287,14 +322,60 @@ impl MoxiBoxApp {
         self.notice = None;
         let content = std::mem::take(&mut self.composer);
         self.history.record(&content);
-        self.run_pending = true;
-        self.cancelled = Arc::new(AtomicBool::new(false));
+        if self.run_pending {
+            // Steering: the running agent reads this at its next step; Stop also drops it.
+            self.queued.push_back(content.trim().to_owned());
+        } else {
+            self.run_pending = true;
+            self.cancelled = Arc::new(AtomicBool::new(false));
+        }
         self.command(AppCommand::SendChat {
             settings: self.settings.clone(),
             content,
             agent_mode: self.agent_mode,
+            auto_approve: self.auto_approve.clone(),
             cancelled: self.cancelled.clone(),
         });
+    }
+
+    /// Re-scan the folder every two seconds so the tree follows edits made anywhere.
+    fn refresh_tree(&mut self, context: &egui::Context) {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.settings.workspace_root.is_empty() || self.workspace_pending || self.worker_lost {
+            return;
+        }
+        if !self.tree_pending && self.tree_requested.elapsed() >= INTERVAL {
+            self.tree_pending = true;
+            self.tree_requested = std::time::Instant::now();
+            self.command(AppCommand::BrowseWorkspace {
+                root: self.settings.workspace_root.clone(),
+            });
+        }
+        context.request_repaint_after(INTERVAL);
+    }
+
+    fn stop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.queued.clear();
+        self.notice = Some("Stopping…".to_owned());
+    }
+
+    fn resolve_approval(&mut self, approved: bool) {
+        if let Some((request_id, _, _)) = self.approval.take() {
+            self.command(AppCommand::ResolveApproval {
+                request_id,
+                approved,
+            });
+        }
+    }
+
+    fn set_auto_approve(&mut self, enabled: bool) {
+        self.auto_approve
+            .store(enabled, std::sync::atomic::Ordering::Release);
+        if enabled {
+            self.resolve_approval(true);
+        }
     }
 
     fn provider_status(&self) -> ProviderStatus {

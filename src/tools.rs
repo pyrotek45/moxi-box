@@ -10,6 +10,7 @@ use crate::domain::{Settings, WorkspaceEntry};
 
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_SEARCH_RESULTS: usize = 50;
+const MAX_LISTED_FILES: usize = 300;
 const MAX_TREE_ENTRIES: usize = 500;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
@@ -20,8 +21,8 @@ pub fn definitions() -> Vec<Value> {
         definition("remember", "Save a concise durable project fact to workspace memory. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"}},"required":["note"]})),
         definition(
             "list_files",
-            "List the workspace files, limited to 50 entries.",
-            json!({"type":"object","properties":{}}),
+            "List files and folders recursively (folders end with /), skipping .git, target, and node_modules. Optional path lists a subfolder.",
+            json!({"type":"object","properties":{"path":{"type":"string","description":"Relative folder; omit for the workspace root."}}}),
         ),
         definition(
             "read_file",
@@ -30,49 +31,142 @@ pub fn definitions() -> Vec<Value> {
         ),
         definition(
             "search_content",
-            "Find text in workspace files.",
-            json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            "Find lines containing text in workspace files. Returns path:line: text, up to 50 matches. Optional path limits the search to a folder or file.",
+            json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"ignore_case":{"type":"boolean"}},"required":["query"]}),
         ),
         definition(
             "write_file",
-            "Create or replace a UTF-8 workspace file. Requires approval.",
+            "Create a UTF-8 workspace file, or replace a whole file. Parent folders are created. Requires approval.",
             json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
         ),
         definition(
+            "edit_file",
+            "Replace one exact occurrence of old_text with new_text in an existing workspace file. Read the file first and copy old_text exactly, including whitespace but without read_file's line-number prefixes. Include enough lines to make it unique. Prefer this over write_file for changes to existing files. Requires approval.",
+            json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}),
+        ),
+        definition(
             "run_command",
-            "Run an executable with arguments in the workspace. Requires approval.",
+            "Run a program with arguments from the workspace root, e.g. program cargo, args [\"test\"]. For pipes, && or redirects use program sh with args [\"-c\", \"...\"]. Use it to build, test, use git, or move and delete files. Output is capped. Requires approval.",
             json!({"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["program"]}),
         ),
     ]
 }
 
 pub fn requires_approval(name: &str) -> bool {
-    matches!(name, "write_file" | "run_command" | "remember")
+    matches!(
+        name,
+        "write_file" | "edit_file" | "run_command" | "remember"
+    )
+}
+
+/// A short, readable name for a call: "Edit src/a.rs" while pending, "Edited src/a.rs" when done.
+pub fn label(name: &str, arguments: &Value, done: bool) -> String {
+    let verb = |pending: &str, past: &str| if done { past } else { pending }.to_owned();
+    let path = arguments["path"].as_str().filter(|path| !path.is_empty());
+    let target = |fallback: &str| path.unwrap_or(fallback).to_owned();
+    match name {
+        "list_files" => match path {
+            Some(path) => format!("{} in {path}", verb("List files", "Listed files")),
+            None => verb("List files", "Listed files"),
+        },
+        "read_file" => format!("{} {}", verb("Read", "Read"), target("a file")),
+        "search_content" => format!(
+            "{} \"{}\"",
+            verb("Search for", "Searched for"),
+            arguments["query"].as_str().unwrap_or("")
+        ),
+        "write_file" => format!("{} {}", verb("Write", "Wrote"), target("a file")),
+        "edit_file" => format!("{} {}", verb("Edit", "Edited"), target("a file")),
+        "run_command" => format!("{} {}", verb("Run", "Ran"), command_line(arguments)),
+        "list_tasks" => verb("Check the task list", "Checked the task list"),
+        "update_tasks" => verb("Update the task list", "Updated the task list"),
+        "remember" => verb("Save a project note", "Saved a project note"),
+        _ => format!("{} {name}", verb("Use", "Used")),
+    }
+}
+
+/// What a mutating call will do, shown for approval and kept in the step afterwards.
+pub fn call_preview(name: &str, arguments: &Value) -> String {
+    let text = |key: &str| arguments[key].as_str().unwrap_or("");
+    match name {
+        "edit_file" => text("old_text")
+            .lines()
+            .map(|line| format!("- {line}"))
+            .chain(text("new_text").lines().map(|line| format!("+ {line}")))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "write_file" => text("content")
+            .lines()
+            .map(|line| format!("+ {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "run_command" => format!("$ {}", command_line(arguments)),
+        "remember" => text("note").to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Step details for people: the useful result, not raw JSON arguments.
+pub fn result_detail(name: &str, arguments: &Value, result: &str) -> String {
+    let preview = call_preview(name, arguments);
+    match name {
+        "update_tasks" | "list_tasks" => {
+            let tasks =
+                serde_json::from_str::<Vec<crate::domain::Task>>(result).unwrap_or_default();
+            if tasks.is_empty() {
+                return "No tasks.".to_owned();
+            }
+            tasks
+                .iter()
+                .map(|task| {
+                    let mark = match task.status {
+                        crate::domain::TaskStatus::Completed => "[x]",
+                        crate::domain::TaskStatus::InProgress => "[~]",
+                        crate::domain::TaskStatus::Pending => "[ ]",
+                    };
+                    format!("{mark} {}", task.title)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        "run_command" => format!("{preview}\n{result}"),
+        _ if preview.is_empty() => result.to_owned(),
+        _ => format!("{result}\n\n{preview}"),
+    }
+}
+
+fn command_line(arguments: &Value) -> String {
+    let args = arguments["args"]
+        .as_array()
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    format!(
+        "{} {args}",
+        arguments["program"].as_str().unwrap_or("command")
+    )
+    .trim()
+    .to_owned()
 }
 
 pub fn approval_summary(name: &str, arguments: &Value) -> String {
     match name {
-        "remember" => format!(
-            "Remember project note: {}",
-            arguments["note"].as_str().unwrap_or("")
-        ),
+        "remember" => "Remember this project note?".to_owned(),
         "write_file" => format!(
-            "Write {}",
+            "Write {} ({} bytes)?",
+            arguments["path"].as_str().unwrap_or("a workspace file"),
+            arguments["content"].as_str().map_or(0, str::len)
+        ),
+        "edit_file" => format!(
+            "Edit {}?",
             arguments["path"].as_str().unwrap_or("a workspace file")
         ),
-        "run_command" => format!(
-            "Run {} {}",
-            arguments["program"].as_str().unwrap_or("command"),
-            arguments["args"]
-                .as_array()
-                .map(|args| args
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" "))
-                .unwrap_or_default()
-        ),
-        _ => format!("Use {name}"),
+        "run_command" => "Run this command in the workspace?".to_owned(),
+        _ => format!("Use {name}?"),
     }
 }
 
@@ -84,7 +178,7 @@ pub fn execute(
 ) -> Result<String, String> {
     let root = canonical_root(&settings.workspace_root)?;
     match name {
-        "list_files" => list_files(&root),
+        "list_files" => list_files(&root, arguments["path"].as_str().unwrap_or("")),
         "read_file" => {
             let path = required_string(arguments, "path")?;
             let start = arguments["start_line"]
@@ -94,6 +188,9 @@ pub fn execute(
             let count = arguments["max_lines"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
             let text = read_file(&root, path)?;
             let lines = text.lines().collect::<Vec<_>>();
+            if start > lines.len().max(1) {
+                return Err(format!("{path} has only {} lines.", lines.len()));
+            }
             let mut output = lines
                 .iter()
                 .enumerate()
@@ -107,11 +204,28 @@ pub fn execute(
             }
             Ok(output)
         }
-        "search_content" => search_content(&root, required_string(arguments, "query")?),
+        "search_content" => {
+            let scope = match arguments["path"].as_str().map(str::trim) {
+                Some(path) if !path.is_empty() && path != "." => safe_path(&root, path, false)?,
+                _ => root.clone(),
+            };
+            search_content(
+                &root,
+                &scope,
+                required_string(arguments, "query")?,
+                arguments["ignore_case"].as_bool().unwrap_or(false),
+            )
+        }
         "write_file" => write_file(
             &root,
             required_string(arguments, "path")?,
             required_string(arguments, "content")?,
+        ),
+        "edit_file" => edit_file(
+            &root,
+            required_string(arguments, "path")?,
+            required_string(arguments, "old_text")?,
+            required_string(arguments, "new_text")?,
         ),
         "run_command" => run_command(
             &root,
@@ -184,15 +298,36 @@ fn safe_path(root: &Path, input: &str, may_not_exist: bool) -> Result<PathBuf, S
     }
     Ok(checked)
 }
-fn list_files(root: &Path) -> Result<String, String> {
-    let mut entries = fs::read_dir(root)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries.truncate(MAX_SEARCH_RESULTS);
-    Ok(entries.join("\n"))
+fn list_files(root: &Path, path: &str) -> Result<String, String> {
+    let directory = if path.trim().is_empty() || path.trim() == "." {
+        root.to_path_buf()
+    } else {
+        safe_path(root, path.trim(), false)?
+    };
+    if !directory.is_dir() {
+        return Err(format!("{path} is not a folder."));
+    }
+    let mut entries = Vec::new();
+    collect_entries(root, &directory, 0, &mut entries)?;
+    if entries.is_empty() {
+        return Ok("(empty folder)".to_owned());
+    }
+    let mut listing = entries
+        .iter()
+        .take(MAX_LISTED_FILES)
+        .map(|entry| {
+            format!(
+                "{}{}",
+                entry.path,
+                if entry.is_directory { "/" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if entries.len() > MAX_LISTED_FILES {
+        listing.push_str("\n[More entries remain. List a subfolder.]");
+    }
+    Ok(listing)
 }
 fn collect_entries(
     root: &Path,
@@ -246,15 +381,36 @@ fn read_file(root: &Path, path: &str) -> Result<String, String> {
     }
     fs::read_to_string(path).map_err(|error| error.to_string())
 }
-fn search_content(root: &Path, query: &str) -> Result<String, String> {
+fn search_content(
+    root: &Path,
+    scope: &Path,
+    query: &str,
+    ignore_case: bool,
+) -> Result<String, String> {
+    if query.is_empty() {
+        return Err("Search query must not be empty.".to_owned());
+    }
+    let query = if ignore_case {
+        query.to_lowercase()
+    } else {
+        query.to_owned()
+    };
     let mut found = Vec::new();
-    search_directory(root, root, query, &mut found)?;
+    if scope.is_file() {
+        search_file(root, scope, &query, ignore_case, &mut found);
+    } else {
+        search_directory(root, scope, &query, ignore_case, &mut found)?;
+    }
+    if found.is_empty() {
+        return Ok(format!("No matches for {query:?}."));
+    }
     Ok(found.join("\n"))
 }
 fn search_directory(
     root: &Path,
     directory: &Path,
     query: &str,
+    ignore_case: bool,
     found: &mut Vec<String>,
 ) -> Result<(), String> {
     for entry in fs::read_dir(directory)
@@ -277,27 +433,36 @@ fn search_directory(
                 .file_name()
                 .is_some_and(|name| name == ".git" || name == "target" || name == "node_modules")
             {
-                search_directory(root, &path, query, found)?;
+                search_directory(root, &path, query, ignore_case, found)?;
             }
         } else if entry.metadata().map_err(|error| error.to_string())?.len() <= MAX_FILE_BYTES {
-            if let Ok(content) = fs::read_to_string(&path) {
-                for (line, text) in content.lines().enumerate() {
-                    if text.contains(query) {
-                        found.push(format!(
-                            "{}:{}: {}",
-                            path.strip_prefix(root).unwrap_or(&path).display(),
-                            line + 1,
-                            text
-                        ));
-                        if found.len() >= MAX_SEARCH_RESULTS {
-                            break;
-                        }
-                    }
-                }
-            }
+            search_file(root, &path, query, ignore_case, found);
         }
     }
     Ok(())
+}
+fn search_file(root: &Path, path: &Path, query: &str, ignore_case: bool, found: &mut Vec<String>) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    for (line, text) in content.lines().enumerate() {
+        let matched = if ignore_case {
+            text.to_lowercase().contains(query)
+        } else {
+            text.contains(query)
+        };
+        if matched {
+            found.push(format!(
+                "{}:{}: {}",
+                path.strip_prefix(root).unwrap_or(path).display(),
+                line + 1,
+                text.chars().take(300).collect::<String>()
+            ));
+            if found.len() >= MAX_SEARCH_RESULTS {
+                break;
+            }
+        }
+    }
 }
 fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
     let path = safe_path(root, path, true)?;
@@ -309,6 +474,31 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         "Wrote {} bytes to {}",
         content.len(),
         path.strip_prefix(root).unwrap_or(&path).display()
+    ))
+}
+fn edit_file(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
+    if old.is_empty() {
+        return Err("old_text must not be empty. Use write_file to create a file.".to_owned());
+    }
+    let text = read_file(root, path)?;
+    // Models send \n line endings; match files saved with \r\n too.
+    let (old, new) = if !text.contains(old) && text.contains("\r\n") {
+        (old.replace('\n', "\r\n"), new.replace('\n', "\r\n"))
+    } else {
+        (old.to_owned(), new.to_owned())
+    };
+    match text.matches(&old).count() {
+        0 => return Err("old_text was not found. Read the file again and copy the exact text, including indentation.".to_owned()),
+        1 => {}
+        count => return Err(format!("old_text matches {count} places. Include more surrounding lines so it is unique.")),
+    }
+    let line = text[..text.find(&old).unwrap_or(0)].lines().count() + 1;
+    fs::write(safe_path(root, path, false)?, text.replacen(&old, &new, 1))
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "Edited {path} at line {line}: replaced {} lines with {} lines.",
+        old.lines().count(),
+        new.lines().count()
     ))
 }
 fn run_command(
@@ -402,7 +592,7 @@ fn run_command(
         }
     }
     let mut text = format!(
-        "exit status: {}\n{}{}",
+        "{}\n{}{}",
         status,
         String::from_utf8_lossy(&output[0]),
         String::from_utf8_lossy(&output[1])
@@ -526,6 +716,110 @@ mod tests {
         assert!(read_file(&fixture.0, "/etc/passwd").is_err());
     }
 
+    #[test]
+    fn agent_file_tools_list_recursively_and_report_bad_requests() {
+        let fixture = Fixture::new();
+        write_file(&fixture.0, "src/main.rs", "fn main() {}\n").unwrap();
+        write_file(&fixture.0, "README.md", "hello").unwrap();
+        fs::create_dir_all(fixture.0.join("target/debug")).unwrap();
+        assert_eq!(
+            list_files(&fixture.0, "").unwrap(),
+            "src/\nsrc/main.rs\nREADME.md"
+        );
+        assert_eq!(list_files(&fixture.0, "src").unwrap(), "src/main.rs");
+        assert!(list_files(&fixture.0, "README.md").is_err());
+        assert!(list_files(&fixture.0, "../").is_err());
+        assert!(search_content(&fixture.0, &fixture.0, "", false).is_err());
+        assert_eq!(
+            search_content(&fixture.0, &fixture.0, "fn main", false).unwrap(),
+            "src/main.rs:1: fn main() {}"
+        );
+        let settings = Settings {
+            workspace_root: fixture.0.to_string_lossy().into_owned(),
+            ..Settings::default()
+        };
+        let none = std::sync::atomic::AtomicBool::new(false);
+        let read = |args: Value| execute(&settings, "read_file", &args, &none);
+        assert_eq!(read(json!({"path":"README.md"})).unwrap(), "1: hello");
+        assert!(read(json!({"path":"README.md","start_line":5}))
+            .unwrap_err()
+            .contains("only 1 lines"));
+        let search = |args: Value| execute(&settings, "search_content", &args, &none);
+        assert_eq!(
+            search(json!({"query":"FN MAIN","ignore_case":true,"path":"src"})).unwrap(),
+            "src/main.rs:1: fn main() {}"
+        );
+        assert!(search(json!({"query":"hello","path":"src"}))
+            .unwrap()
+            .starts_with("No matches"));
+        assert_eq!(
+            search(json!({"query":"hello","path":"README.md"})).unwrap(),
+            "README.md:1: hello"
+        );
+        assert!(search(json!({"query":"x","path":"../"})).is_err());
+        assert!(execute(&settings, "delete_everything", &json!({}), &none).is_err());
+    }
+
+    #[test]
+    fn step_labels_and_details_are_readable() {
+        let edit = json!({"path":"src/a.rs","old_text":"a\nb","new_text":"c"});
+        assert_eq!(label("edit_file", &edit, true), "Edited src/a.rs");
+        assert_eq!(label("edit_file", &edit, false), "Edit src/a.rs");
+        assert_eq!(call_preview("edit_file", &edit), "- a\n- b\n+ c");
+        let command = json!({"program":"cargo","args":["test","--locked"]});
+        assert_eq!(
+            label("run_command", &command, true),
+            "Ran cargo test --locked"
+        );
+        assert_eq!(
+            result_detail("run_command", &command, "exit status: 0"),
+            "$ cargo test --locked\nexit status: 0"
+        );
+        assert_eq!(label("list_files", &json!({}), true), "Listed files");
+        assert_eq!(
+            result_detail(
+                "update_tasks",
+                &json!({}),
+                r#"[{"id":1,"title":"Plan","status":"completed"},{"id":2,"title":"Build","status":"in_progress"}]"#
+            ),
+            "[x] Plan\n[~] Build"
+        );
+        assert_eq!(result_detail("read_file", &json!({}), "1: hi"), "1: hi");
+    }
+
+    #[test]
+    fn edit_file_replaces_exactly_one_match_in_nested_files() {
+        let fixture = Fixture::new();
+        write_file(
+            &fixture.0,
+            "src/app/lib.rs",
+            "fn a() {}\nfn b() {}\nfn b() {}\n",
+        )
+        .unwrap();
+        edit_file(
+            &fixture.0,
+            "src/app/lib.rs",
+            "fn a() {}",
+            "fn a() { run(); }",
+        )
+        .unwrap();
+        assert_eq!(
+            read_file(&fixture.0, "src/app/lib.rs").unwrap(),
+            "fn a() { run(); }\nfn b() {}\nfn b() {}\n"
+        );
+        assert!(edit_file(&fixture.0, "src/app/lib.rs", "fn b() {}", "x")
+            .unwrap_err()
+            .contains("2 places"));
+        assert!(edit_file(&fixture.0, "src/app/lib.rs", "missing", "x")
+            .unwrap_err()
+            .contains("not found"));
+        assert!(edit_file(&fixture.0, "src/app/lib.rs", "", "x").is_err());
+        assert!(edit_file(&fixture.0, "../outside.rs", "a", "b").is_err());
+        write_file(&fixture.0, "win.txt", "one\r\ntwo\r\n").unwrap();
+        edit_file(&fixture.0, "win.txt", "one\ntwo", "1\n2").unwrap();
+        assert_eq!(read_file(&fixture.0, "win.txt").unwrap(), "1\r\n2\r\n");
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_cannot_escape_or_recurse() {
@@ -537,12 +831,16 @@ mod tests {
         symlink(&outside.0, fixture.0.join("directory")).unwrap();
         symlink(&fixture.0, fixture.0.join("cycle")).unwrap();
         assert!(write_file(&fixture.0, "link", "bad").is_err());
+        assert!(edit_file(&fixture.0, "link", "private", "bad").is_err());
         assert!(write_file(&fixture.0, "directory/new/file", "bad").is_err());
         assert!(read_file(&fixture.0, "link").is_err());
         assert!(workspace_entries(fixture.0.to_str().unwrap())
             .unwrap()
             .is_empty());
-        assert!(search_content(&fixture.0, "private").unwrap().is_empty());
+        assert!(search_content(&fixture.0, &fixture.0, "private", false)
+            .unwrap()
+            .starts_with("No matches"));
+        assert!(list_files(&fixture.0, "directory").is_err());
         assert_eq!(
             fs::read_to_string(outside.0.join("secret")).unwrap(),
             "private"

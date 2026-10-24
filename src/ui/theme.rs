@@ -4,6 +4,7 @@ pub const BACKGROUND: Color32 = Color32::from_rgb(33, 33, 33);
 pub const SURFACE: Color32 = Color32::from_rgb(24, 24, 24);
 pub const SURFACE_RAISED: Color32 = Color32::from_rgb(47, 47, 47);
 pub const ACCENT: Color32 = Color32::from_rgb(16, 163, 127);
+pub const TEXT: Color32 = Color32::from_rgb(226, 226, 226);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(158, 158, 158);
 
 pub fn install_theme(context: &egui::Context) {
@@ -27,7 +28,8 @@ pub fn install_theme(context: &egui::Context) {
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.5);
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    // A restrained outline keeps checkboxes and inputs visible on raised cards.
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_gray(68));
     visuals.widgets.hovered.bg_fill = Color32::from_gray(62);
     visuals.widgets.active.bg_fill = Color32::from_gray(72);
     visuals.window_corner_radius = egui::CornerRadius::same(14);
