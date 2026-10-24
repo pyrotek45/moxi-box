@@ -26,6 +26,8 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
 | `run_command` | Runs a program from the workspace root; use `sh -c` for pipes and `&&`. | Required |
 | `remember` | Appends a concise project fact to workspace memory. | Required |
+| `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
+| `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
 
 Tool steps appear live in the reply, in order, with plain titles such as "Read src/main.rs" or "Edited src/app.rs". Expand a step to see its result; edits show a red/green diff. Approve runs an operation once; Deny stops the run. **Auto-approve** (Agent mode header or Settings) runs edits, writes, commands, and memory notes without asking for the rest of the session. Send while Moxi works to queue a message: the agent reads it after its current tool round. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
 
@@ -33,9 +35,9 @@ File tools reject traversal and symlink escapes. Approved commands have the appl
 
 ## Workspaces, summaries, and memory
 
-A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
+A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace and asks for a name (leave it blank to name it from your first message); double-click a workspace or click the title above the chat to rename it; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
 
-Long histories are compacted automatically before they reach the configured context budget (Settings → Provider and context budget). This is a conservative byte-based estimate, not an exact tokenizer. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
+Every message is sent with the workspace's earlier messages, and earlier agent replies carry a short "tools used" note so follow-ups know which files were read or changed. Long histories are compacted automatically before they reach the configured context budget (Settings → Provider and context budget). This is a conservative byte-based estimate, not an exact tokenizer. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
 **Memory** holds editable notes for the current workspace. The agent can propose a `remember` note for approval, or you can write notes yourself. Do not store secrets.
 

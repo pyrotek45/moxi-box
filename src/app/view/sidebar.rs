@@ -23,7 +23,7 @@ impl MoxiBoxApp {
                                     .on_hover_text("New workspace")
                                     .clicked()
                                 {
-                                    self.new_workspace();
+                                    self.name_workspace(None);
                                 }
                             });
                         });
@@ -40,6 +40,9 @@ impl MoxiBoxApp {
                                     match widgets::workspace_row(ui, &workspace, selected, idle) {
                                         Some(widgets::RowAction::Select) => {
                                             self.select_workspace(workspace.id)
+                                        }
+                                        Some(widgets::RowAction::Rename) => {
+                                            self.name_workspace(Some(workspace.id))
                                         }
                                         Some(widgets::RowAction::Delete) => {
                                             self.workspace_name.clear();

@@ -20,6 +20,11 @@ impl MoxiBoxApp {
                         self.set_auto_approve(auto);
                     }
                     ui.label(RichText::new("Off by default and reset at launch. Commands run with your permissions; the workspace folder is not a sandbox.").small().color(TEXT_MUTED));
+                    ui.add_space(8.0);
+                    if ui.checkbox(&mut self.settings.web_access, "Web access: search and read pages when unsure").changed() {
+                        self.command(AppCommand::SaveSettings(self.settings.clone()));
+                    }
+                    ui.label(RichText::new("Searches go to DuckDuckGo. Pages are fetched from this computer.").small().color(TEXT_MUTED));
                     ui.add_space(12.0);
                     ui.label(RichText::new("MODEL PROVIDER").small().color(TEXT_MUTED));
                     ui.add(egui::Label::new(format!("{} · {}", self.settings.provider_name, self.settings.lm_studio_url)).truncate());
@@ -32,6 +37,7 @@ impl MoxiBoxApp {
                         ("run_command", "Build, test, git, move or delete files. Needs approval."),
                         ("list_tasks / update_tasks", "Plan multi-step work in the sidebar task list. Automatic."),
                         ("remember", "Save a project note to workspace memory. Needs approval."),
+                        ("web_search / fetch_url", "Research online when Web access is on. Automatic."),
                     ] {
                         ui.label(RichText::new(name).monospace().size(12.0));
                         ui.label(RichText::new(help).small().color(TEXT_MUTED));

@@ -26,7 +26,16 @@ pub(super) fn run_agent(
         Ok(history) => history,
         Err(error) => return fail_run(store, events, error),
     };
-    let mut messages = lm_studio::provider_messages(lm_studio::AGENT_PROMPT, &history);
+    let prompt = if settings.web_access {
+        format!("{}\n\n{}", lm_studio::AGENT_PROMPT, lm_studio::WEB_PROMPT)
+    } else {
+        lm_studio::AGENT_PROMPT.to_owned()
+    };
+    let mut definitions = tools::definitions();
+    if settings.web_access {
+        definitions.extend(crate::web::definitions());
+    }
+    let mut messages = lm_studio::provider_messages(&prompt, &history);
     let mut reply = Reply::new(reply_id);
     let mut turns = 0;
     while turns < MAX_TURNS {
@@ -45,7 +54,7 @@ pub(super) fn run_agent(
         let response = match runtime.block_on(lm_studio::agent_turn(
             &settings,
             &messages,
-            tools::definitions(),
+            definitions.clone(),
             cancelled,
         )) {
             Ok(response) => response,
@@ -61,6 +70,7 @@ pub(super) fn run_agent(
             for call in &response.tool_calls {
                 let tool = Tool {
                     store,
+                    runtime,
                     events,
                     settings: &settings,
                     message_id: reply.id,
@@ -168,6 +178,7 @@ impl Reply {
 
 struct Tool<'a> {
     store: &'a Store,
+    runtime: &'a Runtime,
     events: &'a EventSender,
     settings: &'a Settings,
     message_id: i64,
@@ -269,6 +280,23 @@ impl Tool<'_> {
                 let memory = format!("{}\n- {note}", self.store.memory()?);
                 self.store.save_memory(memory.trim())?;
                 Ok("Project note saved for future conversations in this workspace.".to_owned())
+            }
+            name if crate::web::is_web_tool(name) => {
+                if !self.settings.web_access {
+                    return Err(
+                        "Web access is off. The user can turn it on in Settings.".to_owned()
+                    );
+                }
+                let future = async {
+                    if name == "web_search" {
+                        crate::web::search(call.arguments["query"].as_str().unwrap_or_default())
+                            .await
+                    } else {
+                        crate::web::fetch(call.arguments["url"].as_str().unwrap_or_default()).await
+                    }
+                };
+                self.runtime
+                    .block_on(lm_studio::cancellable(self.cancelled, future))
             }
             name => {
                 if self.settings.workspace_root.is_empty() {
