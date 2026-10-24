@@ -144,7 +144,12 @@ fn handle(
             let result = runtime.block_on(lm_studio::list_models(&base_url, &cancelled));
             send(events, AppEvent::ModelsLoaded { request_id, result });
         }
-        AppCommand::NewWorkspace => sync_after(store, events, store.create_workspace()),
+        AppCommand::NewWorkspace(name) => {
+            sync_after(store, events, store.create_named_workspace(&name))
+        }
+        AppCommand::RenameWorkspace { id, name } => {
+            sync_after(store, events, store.rename_workspace(id, &name))
+        }
         AppCommand::SelectWorkspace(id) => sync_after(store, events, store.select(id)),
         AppCommand::DeleteWorkspace(id) => sync_after(store, events, store.delete_workspace(id)),
         AppCommand::SaveMemory(content) => sync_after(store, events, store.save_memory(&content)),

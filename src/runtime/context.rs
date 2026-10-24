@@ -19,6 +19,10 @@ pub(super) fn prepare(
     let mut recent = state
         .messages
         .into_iter()
+        .map(|mut message| {
+            note_tools_used(&mut message, &state.activity);
+            message
+        })
         .filter(|message| {
             message.id > through
                 && !message.content.trim().is_empty()
@@ -64,6 +68,23 @@ pub(super) fn prepare(
     let mut history = context_notes(&state.memory, &summary);
     history.extend(recent);
     Ok(history)
+}
+
+/// Earlier replies carry a short record of the tools they ran, so later turns know
+/// which files were read or changed without replaying full tool output.
+fn note_tools_used(message: &mut ChatMessage, activity: &[crate::domain::AgentActivity]) {
+    if message.role != MessageRole::Assistant {
+        return;
+    }
+    let steps = activity
+        .iter()
+        .filter(|step| step.message_id == message.id)
+        .map(|step| step.title.chars().take(120).collect::<String>())
+        .take(12)
+        .collect::<Vec<_>>();
+    if !steps.is_empty() {
+        message.content = format!("[Tools used: {}]\n\n{}", steps.join("; "), message.content);
+    }
 }
 
 /// Memory and summary are context for the model, folded into its single system message.
@@ -191,6 +212,40 @@ pub(super) fn compact_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn earlier_replies_record_the_tools_they_ran() {
+        let step = |message_id, title: &str| crate::domain::AgentActivity {
+            message_id,
+            offset: 0,
+            call_id: title.into(),
+            title: title.into(),
+            detail: "long output".into(),
+            running: false,
+        };
+        let activity = [
+            step(2, "Read src/main.rs"),
+            step(2, "Edited src/app.rs"),
+            step(9, "Other"),
+        ];
+        let mut reply = ChatMessage {
+            id: 2,
+            role: MessageRole::Assistant,
+            content: String::new(),
+        };
+        note_tools_used(&mut reply, &activity);
+        assert_eq!(
+            reply.content,
+            "[Tools used: Read src/main.rs; Edited src/app.rs]\n\n"
+        );
+        let mut question = ChatMessage {
+            id: 2,
+            role: MessageRole::User,
+            content: "hi".into(),
+        };
+        note_tools_used(&mut question, &activity);
+        assert_eq!(question.content, "hi");
+    }
+
     #[test]
     fn compaction_keeps_recent_turns_and_rejects_an_oversized_message() {
         let messages = (0..6)
