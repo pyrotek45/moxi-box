@@ -133,15 +133,6 @@ fn handle(
                 Err(error) => fail(events, error),
             }
         }
-        AppCommand::ListFolders { path, request_id } => {
-            send(
-                events,
-                AppEvent::FoldersListed {
-                    request_id,
-                    result: tools::list_folders(&path),
-                },
-            );
-        }
         AppCommand::ResetWorkspace { path } => {
             let result = tools::reset_workspace(&path).and_then(|backup| {
                 store.new_conversation(&path)?;

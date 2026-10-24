@@ -14,6 +14,7 @@ mod sidebar;
 impl MoxiBoxApp {
     pub(super) fn render(&mut self, context: &egui::Context) {
         self.handle_events(context);
+        self.poll_folder_picker();
         // Worker events wake egui directly; idle windows do not need polling redraws.
         self.header(context);
         if self.show_workspace {
