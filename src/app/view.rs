@@ -20,7 +20,7 @@ impl MoxiBoxApp {
         // run, redraw every frame so stick-to-bottom scrolling settles at once instead of
         // showing a cut-off frame until the next streamed token arrives.
         if self.run_pending {
-            context.request_repaint();
+            context.request_repaint_after(std::time::Duration::from_millis(50));
         }
         self.header(context);
         if self.show_workspace {
