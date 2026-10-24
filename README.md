@@ -86,3 +86,18 @@ Failed-tool recovery: if the model ends a turn while a tool type has failed with
 Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 500 tree entries and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
 
 File editing accepts the canonical path/old_text/new_text fields plus filePath/oldString/newString aliases. Conflicting aliases are rejected. Copied numbered-line prefixes are removed from old_text only after an exact match fails; the resulting match must still be unique.
+
+### Set up a fresh Ubuntu machine
+
+From a terminal in Ubuntu Desktop (22.04 or newer):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git
+git clone https://github.com/pyrotek45/moxi-box.git
+cd moxi-box
+./scripts/setup-ubuntu.sh
+./target/release/moxi-box
+```
+
+Run the script as your normal user; it uses sudo only for Ubuntu packages. It installs build libraries, a native folder-dialog backend, and Rust 1.90.0 through rustup, then builds the locked dependencies. It does not launch the app or configure LM Studio. Allow several GB of free space for Rust and build artifacts. Rerunning is supported. Use `--jobs 1` on low-memory machines, `--debug` for a quicker development build, or `--skip-system` when an administrator has already installed dependencies. `CARGO_TARGET_DIR` is respected; the script prints the resulting executable path. No desktop is required to compile, but running the GUI requires one.
