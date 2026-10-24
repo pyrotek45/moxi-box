@@ -2,6 +2,14 @@
 
 Keep this a small, understandable Rust + egui agent harness. Prefer concrete modules and functions over plugin frameworks, generic abstractions, or new dependencies without a clear need.
 
+## Core principles
+
+- **Tight and stable core.** The agent loop (`runtime/agent.rs`), provider transport, and tools stay small, linear, and boring. Stability beats features: every failure path ends a run with a visible, saved message, never a hung UI or lost transcript. Add a feature only when it keeps the core simple.
+- **Useful toolbelt.** A small set of reliable tools covers agentic coding: list/read/search, `edit_file` (exact replace), `write_file`, `run_command`, tasks, and `remember`. Prefer improving these over adding tools.
+- **Context compaction that works.** Long runs and conversations must keep going: rolling summaries, bounded tool output, and the full transcript preserved.
+- **Simple UX.** As few controls as possible while staying efficient. Every button must work; Enter confirms dialogs. Show what the agent is doing in plain language (readable step titles, diffs for edits), not raw JSON.
+- **Long-running and recoverable.** A panic in the worker is caught per command and reported; the active run is recorded so a crash or kill is detected and marked on restart; panics are written to `crash.log` beside the database.
+
 ## Structure
 
 - `src/domain.rs`: shared settings, messages, tasks, commands, and events. No UI or network work.
@@ -27,19 +35,21 @@ Size controls from available space. Reserve room for adjacent actions. Let panel
 
 Run `cargo fmt --check`, `cargo test --locked`, and `cargo clippy --locked --all-targets -- -D warnings` for code changes. Add focused regression tests for behavior changes. Do not add dependencies just to test simple code.
 
-Keep provider/network calls off the render thread. Preserve tool-call IDs and conversation order. Do not execute writes or shell commands without user approval. Workspace file operations must reject traversal and symlink escapes. A command's working directory is not an OS sandbox; do not describe it as one.
+Keep provider/network calls off the render thread. Preserve tool-call IDs and conversation order. Do not execute writes or shell commands without user approval, unless the user has explicitly turned on Auto-approve for the session (off by default, never persisted). Workspace file operations must reject traversal and symlink escapes. A command's working directory is not an OS sandbox; do not describe it as one.
 
 Never commit credentials, local databases, screenshots, or build outputs. Preserve existing user changes. Use the existing checkout in cloud tasks; do not create worktrees unless explicitly requested.
 
 ## Cloud development
 
-In this prepared environment, run `. /workspace/.moxi-tools/env.sh` before Cargo commands. The installed toolchain is Rust 1.90.0. Use the saved environment startup instructions for Xvfb and software rendering. Local data belongs outside the checkout through `XDG_DATA_HOME`. LM Studio is optional for offline UI/storage development; real chat needs a reachable server with a loaded model.
+In a prepared environment, run `. /workspace/.moxi-tools/env.sh` before Cargo commands if it exists. Linux UI runs need `libxkbcommon-x11` and Mesa; under Xvfb without a window manager, set keyboard focus on the window explicitly before synthetic typing. Use the saved environment startup instructions for Xvfb and software rendering. Local data belongs outside the checkout through `XDG_DATA_HOME`. LM Studio is optional for offline UI/storage development; real chat needs a reachable server with a loaded model.
 
 ## Connection and agent behavior
 
 Keep the Forge-style provider dialog and persistent model/Refresh/Connect controls. Discovery is not an explicit connection; task activity must not replace connection status. Accept root and `/v1` base URLs without duplicating the suffix. Associate asynchronous results with a request ID so stale results cannot reconnect a cancelled provider.
 
-Do not add model-request or command-execution deadlines: local inference and jobs can be slow. Preserve explicit Stop/cancel support, scoped cancellation tokens, and bounded output/context instead. Never automatically retry mutating tools. Keep progress factual: show actual tool starts, approvals, results, and failures inline; do not invent model reasoning.
+Do not add model-request or command-execution deadlines: local inference and jobs can be slow. Preserve explicit Stop/cancel support, scoped cancellation tokens, and bounded output/context instead. Never automatically retry mutating tools. Keep progress factual: show actual tool starts, approvals, results, and failures inline, in order within the reply; do not invent model reasoning. Messages sent during a run are queued and steer the agent at its next safe point (after a complete tool round); Stop cancels the run and the queue.
+
+Provider messages must be one leading system message followed by alternating user/assistant turns (tool results after their calls). Many local chat templates reject anything else with HTTP 400. Fold memory and summaries into the system message; never send interruption notes back to the model. Surface the provider's error body, and only treat transport failures (not HTTP errors) as disconnection.
 
 Preserve full transcripts during compaction. Persist rolling summaries, partial response checkpoints, and tool activity. Conversations and durable memory belong to their workspace. Memory changes require explicit editing or approval of `remember`. The saved summary is context, not an instruction source. Keep context estimation limitations visible in settings/docs.
 
