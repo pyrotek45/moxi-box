@@ -22,9 +22,9 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `list_files` | Lists files and folders recursively, or one subfolder. | Automatic |
 | `read_file` | Reads numbered lines; optional `start_line` and `max_lines` let the model request ranges. Files are limited to 256 KiB. | Automatic |
 | `search_content` | Finds matching lines, optionally in one folder or file and ignoring case. | Automatic |
-| `edit_file` | Replaces one exact passage in an existing file; shown as a diff. | Required |
+| `edit_file` | Replaces one exact passage in an existing file, or every literal match when `replace_all` is explicitly set; shown as a diff. | Required |
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
-| `run_command` | Runs a program from the workspace root; use `sh -c` for pipes and `&&`. | Required |
+| `run_command` | Runs a program from the workspace root, including `python3` scripts; use `sh -c` for pipes and `&&`. | Required |
 | `remember` | Appends a concise project fact to workspace memory. | Required |
 | `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
@@ -37,7 +37,9 @@ File tools reject traversal and symlink escapes. Approved commands have the appl
 
 A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace and asks for a name (leave it blank to name it from your first message); double-click a workspace or click the title above the chat to rename it; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
 
-Every message is sent with the workspace's earlier messages, and earlier agent replies carry a short "tools used" note so follow-ups know which files were read or changed. Long histories are compacted automatically before they reach the configured context budget (Settings → Provider and context budget). This is a conservative byte-based estimate, not an exact tokenizer. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
+Every message is sent with the workspace's earlier messages, a bounded file/folder snapshot, and applicable `AGENTS.md` or `AGENT.md` files. Root instructions apply to the whole folder; nested instructions apply to their subtree and override conflicts. Earlier agent replies carry a short "tools used" note so follow-ups know which files were read or changed.
+
+Context recovery has two modes in provider settings. **Auto** sends the full available history until the provider explicitly reports that context is too large, then summarizes older turns, records a conservative working limit for that workspace, and retries. **Manual** uses the token budget you set and compacts proactively before requests cross a conservative estimate, which can be steadier for models that report context limits inconsistently. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
 **Memory** holds editable notes for the current workspace. The agent can propose a `remember` note for approval, or you can write notes yourself. Do not store secrets.
 
@@ -73,7 +75,7 @@ In **Agent** mode, ask “Plan this work, implement it, verify it, and keep the 
 
 Task metadata updates need no approval. File changes, commands, and memory still require approval. Lists persist per workspace across restarts and conversations. You can also add tasks or toggle completion yourself in the sidebar. An empty task list intentionally clears the plan.
 
-Queued messages wait until the current tool sequence has finished, giving the agent a chance to recover from failed edits before starting the next request. Stop still cancels immediately. `replace_all` replaces all literal matches in one file with approval; missing matches leave the file unchanged. `update_tasks` replaces the whole list, so the agent must include existing tasks it wants to retain; it does not append.
+Queued messages wait until the current tool sequence has finished, giving the agent a chance to recover from failed edits before starting the next request. Stop still cancels immediately. `edit_file` changes one unique match by default; its `replace_all=true` option changes every literal match for mechanical replacements such as an identifier rename. Missing matches leave the file unchanged. `update_tasks` replaces the whole list, so the agent must include existing tasks it wants to retain; it does not append.
 
 Chat bubbles render CommonMark formatting, including headings, emphasis, lists, links, quotes, tables, and fenced code with a copy button. Wide content scrolls horizontally within the bubble. Automatic image loading is disabled.
 
@@ -85,7 +87,7 @@ Command execution is non-interactive: stdin is closed, and args must be an array
 Failed-tool recovery: if the model ends a turn while a tool type has failed without a later successful call, Moxi supplies up to two correction prompts per user request before taking queued work. Recovery stays within the run turn limit, never replays tools automatically, and preserves approvals and cancellation. The model is told to inspect partial command effects before retrying and explain unrecoverable blockers. This improves the opportunity to recover; it does not guarantee model success.
 Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 500 tree entries and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
 
-File editing accepts the canonical path/old_text/new_text fields plus filePath/oldString/newString aliases. Conflicting aliases are rejected. Copied numbered-line prefixes are removed from old_text only after an exact match fails; the resulting match must still be unique.
+File editing accepts the canonical `path`/`old_text`/`new_text` fields plus `filePath`/`oldString`/`newString` aliases. `old_text` is a safety anchor copied from the current file: it prevents a stale or guessed edit from silently changing the wrong code. Conflicting aliases are rejected. Copied numbered-line prefixes and CRLF/LF differences are handled automatically. If no match exists, no write occurs and the result tells the model to reread instead of repeating the failed call. For a complex transformation, the agent can use `run_command` with `python3` and then inspect or test the result.
 
 ### Set up a fresh Ubuntu machine
 
