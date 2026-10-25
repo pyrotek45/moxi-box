@@ -122,6 +122,7 @@ pub(super) fn run_agent(
         } else {
             lm_studio::append_tool_calls(&mut messages, &response);
             for call in &response.tool_calls {
+                let blocked_memory = call.name == "remember" && recovery.has_failed_mutation();
                 let tool = Tool {
                     store,
                     runtime,
@@ -132,9 +133,19 @@ pub(super) fn run_agent(
                     auto_approve: &auto_approve,
                     cancelled,
                 };
-                match tool.run(commands, deferred, call) {
+                let outcome = if blocked_memory {
+                    tool.reject(
+                        call,
+                        "Project memory was not changed because an earlier file or command operation failed. Resolve and verify that operation before recording its result.",
+                    )
+                } else {
+                    tool.run(commands, deferred, call)
+                };
+                match outcome {
                     Ok(Some((observation, success))) => {
-                        recovery.observe(&call.name, success);
+                        if !blocked_memory {
+                            recovery.observe(&call.name, success);
+                        }
                         lm_studio::append_tool_result(&mut messages, call, &observation)
                     }
                     Ok(None) => {
@@ -204,6 +215,15 @@ impl Recovery {
         }
         self.follow_ups += 1;
         Some(format!("Harness recovery check: these tool types have failed without a later successful call: {}. Inspect their error results and the current state. If the user's request remains unfinished, correct the arguments, read the current file, or choose another appropriate tool and continue. Commands may have partially changed state: inspect before retrying. Do not repeat unchanged failing calls, bypass approval, or claim success without evidence. If recovery is impossible or an alternative already completed the work, explain that clearly and stop.", self.failed.iter().cloned().collect::<Vec<_>>().join(", ")))
+    }
+
+    fn has_failed_mutation(&self) -> bool {
+        self.failed.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "write_file" | "edit_file" | "replace_all" | "delete_path" | "run_command"
+            )
+        })
     }
 }
 
@@ -390,6 +410,22 @@ impl Tool<'_> {
             },
             success,
         )))
+    }
+
+    fn reject(&self, call: &ToolCall, reason: &str) -> Result<Option<(String, bool)>, String> {
+        let step = AgentActivity {
+            message_id: self.message_id,
+            offset: self.offset,
+            call_id: call.id.clone(),
+            title: format!(
+                "Failed · {}",
+                tools::label(&call.name, &call.arguments, false)
+            ),
+            detail: reason.to_owned(),
+            running: false,
+        };
+        self.record(&step)?;
+        Ok(Some((format!("Tool error: {reason}"), false)))
     }
 
     fn execute(&self, call: &ToolCall) -> Result<String, String> {
@@ -580,6 +616,7 @@ mod recovery_tests {
         let mut recovery = Recovery::default();
         assert!(recovery.follow_up().is_none());
         recovery.observe("edit_file", false);
+        assert!(recovery.has_failed_mutation());
         recovery.observe("read_file", true);
         assert!(recovery.follow_up().unwrap().contains("edit_file"));
         assert!(recovery.follow_up().is_some());
@@ -588,6 +625,9 @@ mod recovery_tests {
         let mut recovery = Recovery::default();
         recovery.observe("edit_file", false);
         recovery.observe("edit_file", true);
+        assert!(!recovery.has_failed_mutation());
         assert!(recovery.follow_up().is_none());
+        recovery.observe("read_file", false);
+        assert!(!recovery.has_failed_mutation());
     }
 }
