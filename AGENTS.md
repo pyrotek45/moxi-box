@@ -62,10 +62,3 @@ The Settings workspace section must explain that attachment selects one local fo
 Before finishing changes to these features, verify database migration/restart, conversation and memory isolation, compaction, cancellation, and a representative multi-step tool run. Check provider/folder/memory/help dialogs and inline tool approvals at 640×480 as well as 1280×800. Use unique egui IDs for every message's code blocks and activity panels.
 
 Agent task lists use list_tasks/update_tasks with whole-list atomic replacement. Keep lists scoped to the workspace (keyed by workspace id), validate the entire batch before changing anything, and preserve legacy task data during migration. Task status changes do not authorize file changes or commands. Verify batch completion, invalid-batch rollback, workspace isolation, and restart persistence.
-
-## Commit identity and privacy
-
-- Never use the repository owner's legal/real name or personal email address in commit author, committer, co-author trailers, release notes, or generated metadata.
-- Use `pyrotek45` as the Git author and committer name. Use the owner's verified GitHub noreply address when known; otherwise ask before committing rather than guessing or falling back to local machine identity.
-- Before every commit, verify `git var GIT_AUTHOR_IDENT`, `git var GIT_COMMITTER_IDENT`, and all `Co-authored-by` trailers. Explicitly set safe author/committer identity for automated commits, including GitHub integrations.
-- Do not add personal information to Git history; if it is found, flag it and request a controlled history rewrite rather than silently modifying published history.
