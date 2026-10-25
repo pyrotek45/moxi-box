@@ -24,7 +24,7 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `search_content` | Finds matching lines, optionally in one folder or file and ignoring case. | Automatic |
 | `edit_file` | Replaces one exact passage in an existing file, or every literal match when `replace_all` is explicitly set; shown as a diff. | Required |
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
-| `run_command` | Runs a program from the workspace root, including `python3` scripts; use `sh -c` for pipes and `&&`. | Required |
+| `run_command` | Runs one shell command from the workspace root, including builds, tests, Git, and `python3` scripts. | Required |
 | `remember` | Appends a concise project fact to workspace memory. | Required |
 | `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
