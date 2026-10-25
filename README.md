@@ -45,10 +45,12 @@ Context recovery has two modes in provider settings. **Auto** sends the full ava
 
 ## Folder actions
 
-- **Attach / Change** open the native system folder chooser. Cancel keeps the current folder.
-- **New folder** chooses a parent, then asks for a name. Existing directories are never overwritten.
+- Moxi attaches one local folder to each workspace; it does not upload or copy individual files. To work with one file, attach the folder containing it.
+- **Attach or change folder** opens the native system folder chooser. Moxi can list and read inside the selected folder; mutations still follow approval settings. Cancel keeps the current folder.
+- **Create and attach folder** chooses a parent, then asks for a name. Existing directories are never overwritten.
 - **Detach** unlinks the folder; files stay on disk.
 - **Reset** requires typing the folder name. It moves the folder to a sibling `.backup-…` folder and recreates it empty; the conversation is kept.
+- Deleting a workspace removes its conversation, memory, and tasks. Its attached folder and files stay on disk.
 - The file tree refreshes every two seconds and after agent writes. Enter confirms dialogs.
 - Linux needs a running desktop portal and file chooser backend (for example `xdg-desktop-portal` and `xdg-desktop-portal-gtk`).
 
