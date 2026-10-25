@@ -11,6 +11,8 @@ pub struct Settings {
     pub provider_name: String,
     #[serde(default = "default_context_budget")]
     pub context_budget: usize,
+    #[serde(default = "default_auto_context")]
+    pub auto_context: bool,
     pub lm_studio_url: String,
     pub selected_model: Option<String>,
     #[serde(default = "default_workspace_root")]
@@ -25,6 +27,7 @@ impl Default for Settings {
         Self {
             provider_name: default_provider_name(),
             context_budget: default_context_budget(),
+            auto_context: default_auto_context(),
             lm_studio_url: DEFAULT_LM_STUDIO_URL.to_owned(),
             selected_model: None,
             workspace_root: default_workspace_root(),
@@ -35,6 +38,10 @@ impl Default for Settings {
 
 fn default_context_budget() -> usize {
     8192
+}
+
+fn default_auto_context() -> bool {
+    true
 }
 
 fn default_provider_name() -> String {
@@ -255,5 +262,6 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"lm_studio_url":"http://localhost:1234","selected_model":null,"workspace_root":"/tmp/project"}"#).unwrap();
         assert_eq!(settings.provider_name, "LM Studio");
         assert_eq!(settings.workspace_root, "/tmp/project");
+        assert!(settings.auto_context);
     }
 }

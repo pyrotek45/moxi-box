@@ -31,7 +31,7 @@ if $install_system; then
     echo 'Installing compiler, desktop libraries, and native folder chooser…'
     "${sudo_cmd[@]}" apt-get update
     "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential pkg-config curl ca-certificates git \
+        build-essential pkg-config curl ca-certificates git python3 \
         libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
         libxkbcommon-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
         libfontconfig1-dev libssl-dev xdg-desktop-portal xdg-desktop-portal-gtk

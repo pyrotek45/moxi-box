@@ -51,9 +51,9 @@ impl MoxiBoxApp {
                     egui::CollapsingHeader::new("Tool reference").default_open(false).show(ui, |ui| {
                     for (name, help) in [
                         ("list_files / read_file / search_content / grep / glob", "Explore the workspace. Automatic."),
-                        ("edit_file / write_file", "Change or create files. Shows a diff; needs approval."),
+                        ("edit_file / write_file", "Edit existing text or create/replace a file. edit_file can replace one match or every match. Needs approval."),
                         ("delete_path", "Permanently delete a file or folder. Nonempty folders require recursive=true. Needs approval."),
-                        ("run_command", "Build, test, git, move or delete files. Needs approval."),
+                        ("run_command", "Build, test, git, or run Python/scripts for complex edits. Needs approval."),
                         ("list_tasks / update_tasks", "Plan multi-step work in the sidebar task list. Automatic."),
                         ("remember", "Save a project note to workspace memory. Needs approval."),
                         ("web_search / fetch_url", "Research online when Web access is on. Automatic."),
