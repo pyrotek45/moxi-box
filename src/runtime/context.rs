@@ -2,21 +2,20 @@ use super::*;
 use crate::domain::{ChatMessage, Task, TaskStatus};
 use serde_json::{json, Value};
 
-// Conservative byte-based estimate, not a tokenizer or a guarantee of a model's context size.
-pub(super) fn budget(settings: &Settings) -> usize {
-    settings.context_budget.clamp(8192, 131072) * 3 - 6000
-}
-
 pub(super) fn prepare(
     store: &Store,
     runtime: &Runtime,
     settings: &Settings,
     events: &EventSender,
     cancelled: &AtomicBool,
+    learned_limit: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
     let state = store.conversation_state()?;
     let tasks = store.tasks()?;
-    let fixed = state.memory.len() + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
+    let workspace = workspace_context(&settings.workspace_root);
+    let fixed = state.memory.len()
+        + workspace.len()
+        + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
     let (mut summary, through) = store.summary()?;
     let mut recent = state
         .messages
@@ -31,13 +30,14 @@ pub(super) fn prepare(
                 && message.role != MessageRole::System
         })
         .collect::<Vec<_>>();
-    while recent.iter().map(|m| m.content.len() + 80).sum::<usize>() + summary.len() + fixed
-        > budget(settings)
-    {
+    while learned_limit.is_some_and(|limit| {
+        recent.iter().map(|m| m.content.len() + 80).sum::<usize>() + summary.len() + fixed > limit
+    }) {
+        let limit = learned_limit.expect("checked above");
         if recent.len() <= 2 {
-            return Err("The latest messages exceed the context budget. Increase it in provider settings or start a new conversation with a shorter prompt.".to_owned());
+            return Err("The latest messages exceed the context size this provider accepted. Start a new conversation with a shorter prompt.".to_owned());
         }
-        let room = budget(settings).saturating_sub(summary.len() + fixed + 2000);
+        let room = limit.saturating_sub(summary.len() + fixed + 2000);
         let count = compaction_prefix(&recent, room)?;
         let transcript = recent[..count]
             .iter()
@@ -65,7 +65,7 @@ pub(super) fn prepare(
             },
         );
     }
-    let mut history = context_notes(&state.memory, &tasks, &summary);
+    let mut history = context_notes(&state.memory, &tasks, &summary, &workspace);
     history.extend(recent);
     Ok(history)
 }
@@ -89,13 +89,16 @@ fn note_tools_used(message: &mut ChatMessage, activity: &[crate::domain::AgentAc
 
 /// Memory, the task checklist, and the summary are context for the model, folded into
 /// its single system message.
-fn context_notes(memory: &str, tasks: &[Task], summary: &str) -> Vec<ChatMessage> {
+fn context_notes(memory: &str, tasks: &[Task], summary: &str, workspace: &str) -> Vec<ChatMessage> {
     let note = |content: String| ChatMessage {
         id: 0,
         role: MessageRole::System,
         content,
     };
     let mut notes = Vec::new();
+    if !workspace.is_empty() {
+        notes.push(note(workspace.to_owned()));
+    }
     if !memory.is_empty() {
         notes.push(note(format!("User-maintained workspace memory:\n{memory}")));
     }
@@ -124,6 +127,119 @@ fn context_notes(memory: &str, tasks: &[Task], summary: &str) -> Vec<ChatMessage
     notes
 }
 
+/// Small, stable workspace context shared by Chat and Agent modes. Instruction
+/// files are system guidance; the file listing is orientation, not instructions.
+fn workspace_context(root: &str) -> String {
+    if root.trim().is_empty() {
+        return "Workspace snapshot: no folder is attached.".to_owned();
+    }
+    let entries = match crate::tools::workspace_entries(root) {
+        Ok(entries) => entries,
+        Err(error) => return format!("Workspace snapshot unavailable: {error}"),
+    };
+    let mut output = format!(
+        "Workspace folder: {root}\nFiles and folders (snapshot; inspect files before relying on contents):\n{}",
+        entries
+            .iter()
+            .take(120)
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let mut instruction_bytes = 0;
+    for entry in entries.iter().filter(|entry| {
+        !entry.is_directory
+            && matches!(
+                std::path::Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                Some("AGENTS.md" | "AGENT.md")
+            )
+    }) {
+        let path = std::path::Path::new(root).join(&entry.path);
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let remaining = 16_000usize.saturating_sub(instruction_bytes);
+        if remaining == 0 {
+            output.push_str("\n\n[Additional agent instruction files omitted after 16,000 bytes.]");
+            break;
+        }
+        let mut end = content.len().min(remaining).min(8_000);
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        let scope = std::path::Path::new(&entry.path)
+            .parent()
+            .and_then(|path| path.to_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or(".");
+        output.push_str(&format!(
+            "\n\nWorkspace instructions from {} (apply within {scope}/; deeper instruction files override conflicts):\n{}",
+            entry.path,
+            &content[..end]
+        ));
+        instruction_bytes += end;
+    }
+    output
+}
+
+pub(super) fn learn_context_limit(
+    store: &Store,
+    settings: &Settings,
+    events: &EventSender,
+    messages: &[Value],
+) -> Result<usize, String> {
+    let failed_bytes = serde_json::to_vec(messages)
+        .map_err(|error| error.to_string())?
+        .len();
+    // JSON byte counts are deliberately conservative and tokenizer-independent.
+    // Leave headroom because tool schemas and provider templates also consume context.
+    let observed = failed_bytes.saturating_mul(3) / 4;
+    let limit = if settings.auto_context {
+        store
+            .context_limit_bytes()?
+            .map_or(observed, |previous| previous.min(observed))
+            .max(8_192)
+    } else {
+        manual_context_limit(settings).min(observed).max(8_192)
+    };
+    if settings.auto_context {
+        store.save_context_limit_bytes(limit)?;
+    }
+    send(
+        events,
+        AppEvent::Notice(if settings.auto_context {
+            format!(
+                "The provider rejected the context size. Moxi learned a safe workspace limit (about {} KiB) and is compacting once before retrying.",
+                limit.div_ceil(1024)
+            )
+        } else {
+            format!(
+                "The provider rejected the manual context estimate. Moxi is compacting to about {} KiB and retrying this request.",
+                limit.div_ceil(1024)
+            )
+        }),
+    );
+    Ok(limit)
+}
+
+pub(super) fn active_context_limit(
+    store: &Store,
+    settings: &Settings,
+) -> Result<Option<usize>, String> {
+    if settings.auto_context {
+        store.context_limit_bytes()
+    } else {
+        Ok(Some(manual_context_limit(settings)))
+    }
+}
+
+fn manual_context_limit(settings: &Settings) -> usize {
+    // A deliberately conservative tokenizer-independent conversion.
+    settings.context_budget.clamp(8_192, 131_072) * 3 - 6_000
+}
+
 fn compaction_prefix(messages: &[ChatMessage], room: usize) -> Result<usize, String> {
     let mut bytes = 0;
     let mut count = 0;
@@ -147,20 +263,28 @@ pub(super) fn compact_agent(
     settings: &Settings,
     events: &EventSender,
     messages: &mut Vec<Value>,
-    user_id: i64,
     cancelled: &AtomicBool,
+    state: (i64, Option<usize>),
 ) -> Result<(), String> {
+    let (user_id, learned_limit) = state;
+    let Some(limit) = learned_limit else {
+        return Ok(());
+    };
     if serde_json::to_vec(messages)
         .map_err(|e| e.to_string())?
         .len()
-        <= budget(settings)
+        <= limit
     {
         return Ok(());
     }
-    let split = messages
+    let Some(split) = messages
         .iter()
         .rposition(|m| m["role"] == "assistant" && m["tool_calls"].is_array())
-        .ok_or("Agent context is too large; increase its budget.")?;
+    else {
+        // Initial conversation history is compacted by prepare(). This function
+        // only owns preserving an in-flight assistant/tool batch.
+        return Ok(());
+    };
     if split <= 1 {
         return Err("The current tool round exceeds the context budget.".to_owned());
     }
@@ -177,7 +301,7 @@ pub(super) fn compact_agent(
         AppEvent::Notice("Summarizing earlier tool activity…".to_owned()),
     );
     let mut summary = store.summary()?.0;
-    let room = budget(settings).saturating_sub(6000);
+    let room = limit.saturating_sub(6000);
     let mut chunk = Vec::new();
     let mut bytes = 0;
     for message in &messages[1..split] {
@@ -200,7 +324,8 @@ pub(super) fn compact_agent(
     if !chunk.is_empty() {
         summary = runtime.block_on(lm_studio::summarize(settings, &summary, &chunk, cancelled))?;
     }
-    let mut history = context_notes(&store.memory()?, &store.tasks()?, &summary);
+    let workspace = workspace_context(&settings.workspace_root);
+    let mut history = context_notes(&store.memory()?, &store.tasks()?, &summary, &workspace);
     history.push(ChatMessage {
         id: 0,
         role: MessageRole::User,
@@ -212,7 +337,7 @@ pub(super) fn compact_agent(
     if serde_json::to_vec(&compact)
         .map_err(|e| e.to_string())?
         .len()
-        > budget(settings)
+        > limit
     {
         return Err("The latest tool round exceeds the context budget; use smaller tool requests or increase the budget.".to_owned());
     }
@@ -231,6 +356,7 @@ pub(super) fn compact_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn earlier_replies_record_the_tools_they_ran() {
         let step = |message_id, title: &str| crate::domain::AgentActivity {
@@ -276,6 +402,84 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(compaction_prefix(&messages, 1000).unwrap(), 4);
         assert!(compaction_prefix(&messages, 100).is_err());
+    }
+
+    #[test]
+    fn workspace_snapshot_includes_files_and_scoped_agent_instructions() {
+        let root = std::env::temp_dir().join(format!(
+            "moxi-context-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("AGENTS.md"), "Run cargo test.").unwrap();
+        fs::write(root.join("src/AGENT.md"), "Keep this module small.").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn value() {}").unwrap();
+        let context = workspace_context(root.to_str().unwrap());
+        assert!(context.contains("src/lib.rs"));
+        assert!(context.contains("Run cargo test."));
+        assert!(context.contains("apply within ./"));
+        assert!(context.contains("Keep this module small."));
+        assert!(context.contains("apply within src/"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn context_mode_is_learned_in_auto_and_configured_in_manual() {
+        let store = Store::in_memory();
+        let mut settings = Settings::default();
+        assert_eq!(active_context_limit(&store, &settings).unwrap(), None);
+        store.save_context_limit_bytes(48_000).unwrap();
+        assert_eq!(
+            active_context_limit(&store, &settings).unwrap(),
+            Some(48_000)
+        );
+        settings.auto_context = false;
+        settings.context_budget = 32_768;
+        assert_eq!(
+            active_context_limit(&store, &settings).unwrap(),
+            Some(32_768 * 3 - 6_000)
+        );
+    }
+
+    #[test]
+    fn auto_mode_keeps_full_history_before_a_provider_limit_error() {
+        let store = Store::in_memory();
+        for index in 0..6 {
+            store
+                .add_message(
+                    if index % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    &"history ".repeat(2_000),
+                )
+                .unwrap();
+        }
+        let runtime = Runtime::new().unwrap();
+        let (tx, _) = std::sync::mpsc::channel();
+        let events = EventSender {
+            channel: tx,
+            wake: Box::new(|| {}),
+        };
+        let history = prepare(
+            &store,
+            &runtime,
+            &Settings::default(),
+            &events,
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.role != MessageRole::System)
+                .count(),
+            6
+        );
+        assert!(store.summary().unwrap().0.is_empty());
     }
     #[test]
     fn mid_run_compaction_preserves_the_current_tool_call_batch() {
@@ -347,8 +551,8 @@ mod tests {
             &settings,
             &events,
             &mut messages,
-            user_id,
             &AtomicBool::new(false),
+            (user_id, Some(18_576)),
         )
         .unwrap();
         server.join().unwrap();

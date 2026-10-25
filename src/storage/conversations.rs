@@ -292,6 +292,26 @@ impl Store {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+    pub fn context_limit_bytes(&self) -> Result<Option<usize>, String> {
+        self.connection
+            .query_row(
+                "SELECT learned_context_bytes FROM conversations WHERE id=?1",
+                [self.current.get()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|value| value.and_then(|value| usize::try_from(value).ok()))
+            .map_err(|e| e.to_string())
+    }
+    pub fn save_context_limit_bytes(&self, bytes: usize) -> Result<(), String> {
+        let bytes = i64::try_from(bytes).map_err(|_| "Context limit is too large.".to_owned())?;
+        self.connection
+            .execute(
+                "UPDATE conversations SET learned_context_bytes=?1 WHERE id=?2",
+                params![bytes, self.current.get()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
     pub fn memory(&self) -> Result<String, String> {
         match self.connection.query_row(
             "SELECT content FROM workspace_memory WHERE workspace=?1",

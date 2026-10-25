@@ -22,10 +22,15 @@ pub(super) fn run_agent(
     let Some((mut user_id, reply_id)) = begin_run(store, events, &content) else {
         return;
     };
-    let history = match context::prepare(store, runtime, &settings, events, cancelled) {
-        Ok(history) => history,
+    let mut learned_limit = match context::active_context_limit(store, &settings) {
+        Ok(limit) => limit,
         Err(error) => return fail_run(store, events, error),
     };
+    let history =
+        match context::prepare(store, runtime, &settings, events, cancelled, learned_limit) {
+            Ok(history) => history,
+            Err(error) => return fail_run(store, events, error),
+        };
     let prompt = lm_studio::agent_prompt(settings.web_access);
     let mut definitions = tools::definitions();
     if settings.web_access {
@@ -34,6 +39,7 @@ pub(super) fn run_agent(
     let mut messages = lm_studio::provider_messages(&prompt, &history);
     let mut reply = Reply::new(reply_id);
     let mut turns = 0;
+    let mut context_retries = 0;
     let mut recovery = Recovery::default();
     while turns < MAX_TURNS {
         turns += 1;
@@ -43,8 +49,8 @@ pub(super) fn run_agent(
             &settings,
             events,
             &mut messages,
-            user_id,
             cancelled,
+            (user_id, learned_limit),
         ) {
             return fail_run(store, events, error);
         }
@@ -68,6 +74,43 @@ pub(super) fn run_agent(
             Ok(response) => response,
             Err(error) => {
                 let _ = reply.save(store);
+                if context_retries < 2 && reply.fresh_turn && lm_studio::is_context_limit(&error) {
+                    let limit =
+                        match context::learn_context_limit(store, &settings, events, &messages) {
+                            Ok(limit) => limit,
+                            Err(error) => return fail_run(store, events, error),
+                        };
+                    learned_limit = Some(limit);
+                    context_retries += 1;
+                    let has_tool_round = messages.iter().any(|message| message["role"] == "tool");
+                    if has_tool_round {
+                        if let Err(error) = context::compact_agent(
+                            store,
+                            runtime,
+                            &settings,
+                            events,
+                            &mut messages,
+                            cancelled,
+                            (user_id, learned_limit),
+                        ) {
+                            return fail_run(store, events, error);
+                        }
+                    } else {
+                        let history = match context::prepare(
+                            store,
+                            runtime,
+                            &settings,
+                            events,
+                            cancelled,
+                            learned_limit,
+                        ) {
+                            Ok(history) => history,
+                            Err(error) => return fail_run(store, events, error),
+                        };
+                        messages = lm_studio::provider_messages(&prompt, &history);
+                    }
+                    continue;
+                }
                 return provider_failed(store, events, cancelled, error);
             }
         };
