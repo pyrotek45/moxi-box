@@ -16,11 +16,11 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
     vec![
-        definition("grep", "Search workspace text with a regular expression. Returns path:line:text. Optional include is a glob such as **/*.rs. Scans at most 500 tree entries and returns at most 50 matches; files over 256 KiB are skipped.", json!({"type":"object","properties":{"pattern":{"type":"string"},"include":{"type":"string"},"ignore_case":{"type":"boolean"}},"required":["pattern"]})),
-        definition("glob", "Find workspace files by glob pattern, for example **/*.py. Scans at most 500 tree entries. Skips symlinks and generated directories.", json!({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]})),
+        definition("grep", "Search file contents with a regular expression. Use search_content for plain text. Returns path:line:text.", json!({"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression to search for, for example fn\\s+main"},"include":{"type":"string","description":"Optional file glob, for example **/*.rs"},"ignore_case":{"type":"boolean","description":"Use case-insensitive matching"}},"required":["pattern"]})),
+        definition("glob", "Find files by path glob. Use grep or search_content to search inside files.", json!({"type":"object","properties":{"pattern":{"type":"string","description":"Path glob, for example **/*.py"}},"required":["pattern"]})),
         definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string","description":"Path inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
-        definition("update_tasks", "Replace the entire workspace task list atomically, like TodoWrite. Include all items you want to keep. Create a short plan for multi-step work; update status as work progresses. One call can complete many tasks. Mark completed only after verifying success; failed or unfinished work stays pending or in_progress. Use [] only to intentionally clear the list. No approval needed; this changes task metadata only.", json!({"type":"object","additionalProperties":false,"properties":{"tasks":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
+        definition("update_tasks", "Replace the whole task list. Send every task to keep. One call may update or complete many tasks. Example: {\"tasks\":[{\"title\":\"Inspect code\",\"status\":\"in_progress\"}]}", json!({"type":"object","properties":{"tasks":{"type":"array","description":"Complete replacement task list","items":{"type":"object","properties":{"title":{"type":"string","description":"Short task description"},"status":{"type":"string","description":"Current task state","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
         definition("remember", "Save a concise durable project fact to workspace memory. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"}},"required":["note"]})),
         definition(
             "list_files",
@@ -49,8 +49,8 @@ pub fn definitions() -> Vec<Value> {
         ),
         definition(
             "run_command",
-            "Run a program with arguments from the workspace root. Use it to build, test, use git, or perform transformations that edit_file cannot express. Python is supported: use program python3 with args [\"script.py\"] or [\"-c\", \"...\"], then inspect or test changed files. For pipes, &&, redirects, or shell commands use program sh with args [\"-c\", \"...\"]. Output is capped. Requires approval.",
-            json!({"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["program"]}),
+            "Run one shell command from the workspace root. Use for builds, tests, git, or a Python transformation that edit_file cannot express. Inspect or test changes afterward. Output is capped. Requires approval.",
+            json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, for example cargo test or python3 script.py"}},"required":["command"]}),
         ),
     ]
 }
@@ -65,7 +65,10 @@ pub fn requires_approval(name: &str) -> bool {
 /// A short, readable name for a call: "Edit src/a.rs" while pending, "Edited src/a.rs" when done.
 pub fn label(name: &str, arguments: &Value, done: bool) -> String {
     let verb = |pending: &str, past: &str| if done { past } else { pending }.to_owned();
-    let path = arguments["path"].as_str().filter(|path| !path.is_empty());
+    let path = ["path", "file_path", "filePath"]
+        .iter()
+        .find_map(|key| arguments[*key].as_str())
+        .filter(|path| !path.is_empty());
     let target = |fallback: &str| path.unwrap_or(fallback).to_owned();
     match name {
         "list_files" => match path {
@@ -152,6 +155,9 @@ pub fn result_detail(name: &str, arguments: &Value, result: &str) -> String {
 }
 
 fn command_line(arguments: &Value) -> String {
+    if let Some(command) = arguments["command"].as_str() {
+        return command.to_owned();
+    }
     let args = arguments["args"]
         .as_array()
         .map(|args| {
@@ -208,9 +214,12 @@ pub fn execute(
 ) -> Result<String, String> {
     let root = canonical_root(&settings.workspace_root)?;
     match name {
-        "list_files" => list_files(&root, arguments["path"].as_str().unwrap_or("")),
+        "list_files" => list_files(
+            &root,
+            optional_string(arguments, "path", &["folder", "directory"])?.unwrap_or(""),
+        ),
         "read_file" => {
-            let path = required_string(arguments, "path")?;
+            let path = required_string_aliases(arguments, "path", &["file_path", "filePath"])?;
             let start = arguments["start_line"]
                 .as_u64()
                 .unwrap_or(1)
@@ -235,26 +244,32 @@ pub fn execute(
             Ok(output)
         }
         "search_content" => {
-            let scope = match arguments["path"].as_str().map(str::trim) {
+            let scope = match optional_string(
+                arguments,
+                "path",
+                &["folder", "directory", "file_path", "filePath"],
+            )?
+            .map(str::trim)
+            {
                 Some(path) if !path.is_empty() && path != "." => safe_path(&root, path, false)?,
                 _ => root.clone(),
             };
             search_content(
                 &root,
                 &scope,
-                required_string(arguments, "query")?,
+                required_string_aliases(arguments, "query", &["text", "pattern"])?,
                 arguments["ignore_case"].as_bool().unwrap_or(false),
             )
         }
         "write_file" => write_file(
             &root,
-            required_string(arguments, "path")?,
-            required_string(arguments, "content")?,
+            required_string_aliases(arguments, "path", &["file_path", "filePath"])?,
+            required_string_aliases(arguments, "content", &["text", "contents"])?,
         ),
         "grep" | "glob" => discover(&root, name, arguments),
         "delete_path" => delete_path(
             &root,
-            required_string(arguments, "path")?,
+            required_string_aliases(arguments, "path", &["file_path", "filePath"])?,
             arguments
                 .get("recursive")
                 .map(|v| v.as_bool().ok_or("recursive must be a boolean"))
@@ -274,12 +289,25 @@ pub fn execute(
             edit_argument(arguments, "new_text", &["newString", "new_string"])?,
             optional_bool(arguments, "replace_all", &["replaceAll"])?,
         ),
-        "run_command" => run_command(
-            &root,
-            required_string(arguments, "program")?,
-            command_arguments(arguments)?,
-            cancelled,
-        ),
+        "run_command" => {
+            if arguments.get("command").is_some()
+                && (arguments.get("program").is_some() || arguments.get("args").is_some())
+            {
+                return Err("Use command by itself; do not also send program or args.".into());
+            }
+            if let Some(command) = optional_string(arguments, "command", &[])? {
+                let shell_args = vec![json!("-c"), json!(command)];
+                run_command(&root, "sh", Some(&shell_args), cancelled)
+            } else {
+                // Compatibility with calls saved by older Moxi versions.
+                run_command(
+                    &root,
+                    required_string(arguments, "program")?,
+                    command_arguments(arguments)?,
+                    cancelled,
+                )
+            }
+        }
         _ => Err(format!("Unknown tool: {name}")),
     }
 }
@@ -310,6 +338,37 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
     value[key]
         .as_str()
         .ok_or_else(|| format!("Missing string argument: {key}"))
+}
+
+/// Accept common argument spellings emitted by small local models while
+/// rejecting ambiguous calls that provide different values for two spellings.
+fn optional_string<'a>(
+    arguments: &'a Value,
+    name: &str,
+    aliases: &[&str],
+) -> Result<Option<&'a str>, String> {
+    let mut selected = None;
+    for key in std::iter::once(name).chain(aliases.iter().copied()) {
+        if let Some(value) = arguments.get(key) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("{key} must be a string"))?;
+            if selected.is_some_and(|previous| previous != value) {
+                return Err(format!("Conflicting values for {name}"));
+            }
+            selected = Some(value);
+        }
+    }
+    Ok(selected)
+}
+
+fn required_string_aliases<'a>(
+    arguments: &'a Value,
+    name: &str,
+    aliases: &[&str],
+) -> Result<&'a str, String> {
+    optional_string(arguments, name, aliases)?
+        .ok_or_else(|| format!("Missing string argument: {name}"))
 }
 fn canonical_root(root: &str) -> Result<PathBuf, String> {
     fs::canonicalize(root).map_err(|error| format!("Invalid workspace root: {error}"))
@@ -556,7 +615,11 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
     ))
 }
 fn discover(root: &Path, name: &str, arguments: &Value) -> Result<String, String> {
-    let pattern = required_string(arguments, "pattern")?;
+    let pattern = if name == "grep" {
+        required_string_aliases(arguments, "pattern", &["query", "regex"])?
+    } else {
+        required_string_aliases(arguments, "pattern", &["glob"])?
+    };
     if pattern.is_empty() || pattern.len() > 2000 {
         return Err("Use a pattern of 1–2000 bytes.".into());
     }
@@ -1115,6 +1178,10 @@ mod tests {
         let none = std::sync::atomic::AtomicBool::new(false);
         let read = |args: Value| execute(&settings, "read_file", &args, &none);
         assert_eq!(read(json!({"path":"README.md"})).unwrap(), "1: hello");
+        assert_eq!(read(json!({"file_path":"README.md"})).unwrap(), "1: hello");
+        assert!(read(json!({"path":"README.md","file_path":"src/main.rs"}))
+            .unwrap_err()
+            .contains("Conflicting"));
         assert_eq!(read(json!({"path":"/README.md"})).unwrap(), "1: hello");
         assert_eq!(
             read(json!({"path":format!("/{}/README.md", fixture.0.file_name().unwrap().to_string_lossy())}))
@@ -1147,6 +1214,22 @@ mod tests {
         assert!(search(json!({"query":"x","path":"../"})).is_err());
         assert!(search(json!({"query":"x","path":"/../"})).is_err());
         assert!(execute(&settings, "delete_everything", &json!({}), &none).is_err());
+        let command = execute(
+            &settings,
+            "run_command",
+            &json!({"command":"printf local-model-command"}),
+            &none,
+        )
+        .unwrap();
+        assert!(command.contains("local-model-command"));
+        assert!(execute(
+            &settings,
+            "run_command",
+            &json!({"command":"true","program":"sh"}),
+            &none
+        )
+        .unwrap_err()
+        .contains("by itself"));
     }
 
     #[test]
@@ -1163,6 +1246,14 @@ mod tests {
         assert_eq!(
             result_detail("run_command", &command, "exit status: 0"),
             "$ cargo test --locked\nexit status: 0"
+        );
+        assert_eq!(
+            label(
+                "run_command",
+                &json!({"command":"python3 tools/fix.py"}),
+                false
+            ),
+            "Run python3 tools/fix.py"
         );
         assert_eq!(label("list_files", &json!({}), true), "Listed files");
         assert_eq!(
