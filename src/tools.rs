@@ -322,8 +322,12 @@ fn workspace_relative<'a>(root: &Path, input: &'a str) -> Result<&'a Path, Strin
     let input = input.trim();
     let path = Path::new(input);
     let relative = if path.is_absolute() {
-        path.strip_prefix(root)
-            .unwrap_or_else(|_| Path::new(input.trim_start_matches('/')))
+        path.strip_prefix(root).unwrap_or_else(|_| {
+            let shorthand = Path::new(input.trim_start_matches('/'));
+            root.file_name()
+                .and_then(|name| shorthand.strip_prefix(name).ok())
+                .unwrap_or(shorthand)
+        })
     } else {
         path
     };
@@ -1088,6 +1092,17 @@ mod tests {
         assert_eq!(list_files(&fixture.0, "/src").unwrap(), "src/main.rs");
         assert!(list_files(&fixture.0, "README.md").is_err());
         assert!(list_files(&fixture.0, "../").is_err());
+        let absolute_new = fixture.0.join("absolute.txt");
+        write_file(
+            &fixture.0,
+            absolute_new.to_str().unwrap(),
+            "created through an absolute in-workspace path",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(absolute_new).unwrap(),
+            "created through an absolute in-workspace path"
+        );
         assert!(search_content(&fixture.0, &fixture.0, "", false).is_err());
         assert_eq!(
             search_content(&fixture.0, &fixture.0, "fn main", false).unwrap(),
@@ -1101,6 +1116,11 @@ mod tests {
         let read = |args: Value| execute(&settings, "read_file", &args, &none);
         assert_eq!(read(json!({"path":"README.md"})).unwrap(), "1: hello");
         assert_eq!(read(json!({"path":"/README.md"})).unwrap(), "1: hello");
+        assert_eq!(
+            read(json!({"path":format!("/{}/README.md", fixture.0.file_name().unwrap().to_string_lossy())}))
+                .unwrap(),
+            "1: hello"
+        );
         assert_eq!(
             read(json!({"path":fixture.0.join("README.md").to_string_lossy()})).unwrap(),
             "1: hello"
