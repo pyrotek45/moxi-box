@@ -33,9 +33,21 @@ impl MoxiBoxApp {
                             draft.selected_model = (!model.trim().is_empty()).then_some(model);
                         }
                         ui.label(RichText::new("Save updates the provider and discovers models. Click Connect in the header when you're ready.").small().color(TEXT_MUTED));
-                        egui::CollapsingHeader::new("Context budget").show(ui, |ui| {
-                            ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut draft.context_budget).range(8192..=131072).speed(1024)); ui.label("estimated tokens"); });
-                            ui.label(RichText::new("Use your model's supported context size. Older turns are summarized automatically; complete logs stay saved. Token usage is estimated.").small().color(TEXT_MUTED));
+                        egui::CollapsingHeader::new("Context recovery").show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut draft.auto_context, true, "Auto");
+                                ui.radio_value(&mut draft.auto_context, false, "Manual");
+                            });
+                            if draft.auto_context {
+                                ui.label(RichText::new("Sends full history until the provider reports that context is full, then learns a safe limit for this workspace and retries.").small().color(TEXT_MUTED));
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::DragValue::new(&mut draft.context_budget).range(8192..=131072).speed(1024));
+                                    ui.label("tokens");
+                                });
+                                ui.label(RichText::new("Compacts before requests cross this conservative estimate. More predictable for models whose context errors are inconsistent.").small().color(TEXT_MUTED));
+                            }
+                            ui.label(RichText::new("Complete conversation logs always stay saved.").small().color(TEXT_MUTED));
                         });
                         if let Some(error) = &self.provider_form_error { ui.colored_label(Color32::LIGHT_RED, error); }
                     });

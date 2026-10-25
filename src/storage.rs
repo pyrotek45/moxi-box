@@ -11,7 +11,7 @@ use crate::domain::{
 
 const DATABASE_DIRECTORY: &str = "moxi-box";
 const DATABASE_FILENAME: &str = "moxi-box.sqlite";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// A workspace is one conversation with its own memory and tasks, and an optional folder.
 pub struct Store {
@@ -99,6 +99,13 @@ impl Store {
             self.migrate_tasks()?;
             if version < 4 {
                 self.migrate_to_workspaces()?;
+            }
+            if version < 5 {
+                self.connection
+                    .execute_batch(
+                        "ALTER TABLE conversations ADD COLUMN learned_context_bytes INTEGER;",
+                    )
+                    .map_err(|e| e.to_string())?;
             }
             self.connection.execute_batch("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);").map_err(|e| e.to_string())?;
             self.connection
@@ -370,6 +377,7 @@ mod tests {
                 .unwrap()
                 .id;
             store.save_summary("durable summary", last).unwrap();
+            store.save_context_limit_bytes(98_304).unwrap();
             store
                 .record_tool(&AgentActivity {
                     message_id: last,
@@ -405,12 +413,14 @@ mod tests {
             assert_eq!(state.current, first_id);
             assert_eq!(state.messages.len(), 511);
             assert_eq!(state.summary, "durable summary");
+            assert_eq!(store.context_limit_bytes().unwrap(), Some(98_304));
             assert_eq!(state.memory, "Use cargo test");
             assert_eq!(state.activity[0].title, "Read file");
             assert_eq!(state.workspaces.len(), 3);
             store.select(2).unwrap();
             assert_eq!(store.memory().unwrap(), "Only for the parser");
             store.select(second_id).unwrap();
+            assert_eq!(store.context_limit_bytes().unwrap(), None);
             store.set_active_run(Some(1)).unwrap();
         }
         {

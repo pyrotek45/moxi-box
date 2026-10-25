@@ -323,28 +323,55 @@ fn send_chat(
     let Some((_, reply_id)) = begin_run(store, events, &content) else {
         return;
     };
-    let messages = match context::prepare(store, runtime, &settings, events, cancelled) {
-        Ok(history) => lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history),
+    let mut learned_limit = match context::active_context_limit(store, &settings) {
+        Ok(limit) => limit,
         Err(error) => return fail_run(store, events, error),
     };
+    let history =
+        match context::prepare(store, runtime, &settings, events, cancelled, learned_limit) {
+            Ok(history) => lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history),
+            Err(error) => return fail_run(store, events, error),
+        };
+    let mut messages = history;
     let mut partial = String::new();
     let mut checkpoint = std::time::Instant::now();
     let mut checkpoint_error = None;
-    let result = runtime.block_on(lm_studio::stream_chat(
-        &settings,
-        &messages,
-        cancelled,
-        |text| {
-            partial.push_str(&text);
-            if checkpoint.elapsed() >= std::time::Duration::from_millis(250) {
-                if let Err(error) = store.replace_message_content(reply_id, &partial) {
-                    checkpoint_error = Some(error);
+    let mut context_retries = 0;
+    let result = loop {
+        let result = runtime.block_on(lm_studio::stream_chat(
+            &settings,
+            &messages,
+            cancelled,
+            |text| {
+                partial.push_str(&text);
+                if checkpoint.elapsed() >= std::time::Duration::from_millis(250) {
+                    if let Err(error) = store.replace_message_content(reply_id, &partial) {
+                        checkpoint_error = Some(error);
+                    }
+                    checkpoint = std::time::Instant::now();
                 }
-                checkpoint = std::time::Instant::now();
-            }
-            send(events, AppEvent::ChatDelta { id: reply_id, text })
-        },
-    ));
+                send(events, AppEvent::ChatDelta { id: reply_id, text })
+            },
+        ));
+        let Err(error) = &result else {
+            break result;
+        };
+        if context_retries >= 2 || !partial.is_empty() || !lm_studio::is_context_limit(error) {
+            break result;
+        }
+        let limit = match context::learn_context_limit(store, &settings, events, &messages) {
+            Ok(limit) => limit,
+            Err(error) => return fail_run(store, events, error),
+        };
+        learned_limit = Some(limit);
+        context_retries += 1;
+        let history =
+            match context::prepare(store, runtime, &settings, events, cancelled, learned_limit) {
+                Ok(history) => history,
+                Err(error) => return fail_run(store, events, error),
+            };
+        messages = lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history);
+    };
     if let Some(error) = store
         .replace_message_content(reply_id, &partial)
         .err()
