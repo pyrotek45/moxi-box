@@ -35,7 +35,7 @@ Size controls from available space. Reserve room for adjacent actions. Let panel
 
 Run `cargo fmt --check`, `cargo test --locked`, and `cargo clippy --locked --all-targets -- -D warnings` for code changes. Add focused regression tests for behavior changes. Do not add dependencies just to test simple code.
 
-Keep provider/network calls off the render thread. Preserve tool-call IDs and conversation order. Do not execute writes or shell commands without user approval, unless the user has explicitly turned on Auto-approve for the session (off by default, never persisted). Workspace file operations must reject traversal and symlink escapes. A command's working directory is not an OS sandbox; do not describe it as one.
+Keep provider/network calls off the render thread. Preserve tool-call IDs and conversation order. Do not execute writes or shell commands without user approval, unless the user has explicitly turned on Auto-approve for the session (off by default, never persisted). Workspace file operations must reject traversal and symlink escapes. Accept a leading slash as workspace-root shorthand because small models commonly emit `/src`; it must never grant access to the OS root. A command's working directory is not an OS sandbox; do not describe it as one.
 
 Never commit credentials, local databases, screenshots, or build outputs. Preserve existing user changes. Use the existing checkout in cloud tasks; do not create worktrees unless explicitly requested.
 

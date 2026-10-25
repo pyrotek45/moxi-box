@@ -18,34 +18,34 @@ pub fn definitions() -> Vec<Value> {
     vec![
         definition("grep", "Search workspace text with a regular expression. Returns path:line:text. Optional include is a glob such as **/*.rs. Scans at most 500 tree entries and returns at most 50 matches; files over 256 KiB are skipped.", json!({"type":"object","properties":{"pattern":{"type":"string"},"include":{"type":"string"},"ignore_case":{"type":"boolean"}},"required":["pattern"]})),
         definition("glob", "Find workspace files by glob pattern, for example **/*.py. Scans at most 500 tree entries. Skips symlinks and generated directories.", json!({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]})),
-        definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
+        definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string","description":"Path inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the entire workspace task list atomically, like TodoWrite. Include all items you want to keep. Create a short plan for multi-step work; update status as work progresses. One call can complete many tasks. Mark completed only after verifying success; failed or unfinished work stays pending or in_progress. Use [] only to intentionally clear the list. No approval needed; this changes task metadata only.", json!({"type":"object","additionalProperties":false,"properties":{"tasks":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
         definition("remember", "Save a concise durable project fact to workspace memory. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"}},"required":["note"]})),
         definition(
             "list_files",
             "List files and folders recursively (folders end with /), skipping .git, target, and node_modules. Optional path lists a subfolder.",
-            json!({"type":"object","properties":{"path":{"type":"string","description":"Relative folder; omit for the workspace root."}}}),
+            json!({"type":"object","properties":{"path":{"type":"string","description":"Folder inside the workspace; omit for the root. Prefer essays; /essays is also accepted as workspace-root shorthand."}}}),
         ),
         definition(
             "read_file",
             "Read numbered lines from a UTF-8 workspace file. Use start_line and max_lines for larger files.",
-            json!({"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":500}},"required":["path"]}),
+            json!({"type":"object","properties":{"path":{"type":"string","description":"File inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":500}},"required":["path"]}),
         ),
         definition(
             "search_content",
             "Find lines containing text in workspace files. Returns path:line: text, up to 50 matches. Optional path limits the search to a folder or file.",
-            json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"ignore_case":{"type":"boolean"}},"required":["query"]}),
+            json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string","description":"Optional file or folder inside the workspace. Prefer essays; /essays is also accepted as workspace-root shorthand."},"ignore_case":{"type":"boolean"}},"required":["query"]}),
         ),
         definition(
             "write_file",
             "Create a UTF-8 workspace file, or replace a whole file. Parent folders are created. Requires approval.",
-            json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
+            json!({"type":"object","properties":{"path":{"type":"string","description":"File inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"content":{"type":"string"}},"required":["path","content"]}),
         ),
         definition(
             "edit_file",
             "Edit an existing file by finding old_text and replacing it with new_text. old_text is a safety anchor: copy a small, exact passage from read_file so the tool changes the intended code instead of guessing. Line-number prefixes are tolerated. By default the passage must occur once; set replace_all=true only for a repeated literal rename or other mechanical replacement. For complex scripted transformations, use run_command with python3, then read or test the result. Requires approval.",
-            json!({"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","description":"Workspace-relative file path"},"old_text":{"type":"string","minLength":1,"description":"Existing text to find; copy it from read_file"},"new_text":{"type":"string","description":"Replacement text"},"replace_all":{"type":"boolean","default":false,"description":"Replace every occurrence. Use only when every match should change, such as renaming a repeated identifier."}},"required":["path","old_text","new_text"]}),
+            json!({"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","description":"File inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"old_text":{"type":"string","minLength":1,"description":"Existing text to find; copy it from read_file"},"new_text":{"type":"string","description":"Replacement text"},"replace_all":{"type":"boolean","default":false,"description":"Replace every occurrence. Use only when every match should change, such as renaming a repeated identifier."}},"required":["path","old_text","new_text"]}),
         ),
         definition(
             "run_command",
@@ -314,18 +314,35 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 fn canonical_root(root: &str) -> Result<PathBuf, String> {
     fs::canonicalize(root).map_err(|error| format!("Invalid workspace root: {error}"))
 }
-fn safe_path(root: &Path, input: &str, may_not_exist: bool) -> Result<PathBuf, String> {
-    let relative = Path::new(input);
-    if relative.is_absolute()
-        || relative.components().any(|part| {
-            matches!(
-                part,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err("Path must be relative to the workspace.".to_owned());
+
+/// Models often write "/src" to mean "from the workspace root." Accept that
+/// shorthand without ever treating it as an OS path. A true absolute path to
+/// the selected workspace is also reduced to its relative suffix.
+fn workspace_relative<'a>(root: &Path, input: &'a str) -> Result<&'a Path, String> {
+    let input = input.trim();
+    let path = Path::new(input);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root)
+            .unwrap_or_else(|_| Path::new(input.trim_start_matches('/')))
+    } else {
+        path
+    };
+    if relative.components().any(|part| {
+        matches!(
+            part,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(
+            "Path must stay inside the workspace; remove '..' and use a workspace path such as essays/file.md."
+                .to_owned(),
+        );
     }
+    Ok(relative)
+}
+
+fn safe_path(root: &Path, input: &str, may_not_exist: bool) -> Result<PathBuf, String> {
+    let relative = workspace_relative(root, input)?;
     let candidate = root.join(relative);
     let checked = if may_not_exist && fs::symlink_metadata(&candidate).is_err() {
         let mut ancestor = candidate.as_path();
@@ -539,12 +556,13 @@ fn discover(root: &Path, name: &str, arguments: &Value) -> Result<String, String
     if pattern.is_empty() || pattern.len() > 2000 {
         return Err("Use a pattern of 1–2000 bytes.".into());
     }
-    let filter = glob::Pattern::new(if name == "glob" {
+    let filter_text = if name == "glob" {
         pattern
     } else {
         arguments["include"].as_str().unwrap_or("**/*")
-    })
-    .map_err(|e| e.to_string())?;
+    }
+    .trim_start_matches('/');
+    let filter = glob::Pattern::new(filter_text).map_err(|e| e.to_string())?;
     let regex = if name == "grep" {
         Some(
             regex::RegexBuilder::new(pattern)
@@ -602,7 +620,7 @@ fn delete_path(root: &Path, path: &str, recursive: bool) -> Result<String, Strin
     }
     // Reject symlink aliases rather than deleting their resolved targets.
     let mut component = root.to_path_buf();
-    for part in Path::new(path).components() {
+    for part in workspace_relative(root, path)?.components() {
         component.push(part);
         if fs::symlink_metadata(&component)
             .map_err(|e| e.to_string())?
@@ -1067,6 +1085,7 @@ mod tests {
             "src/\nsrc/main.rs\nREADME.md"
         );
         assert_eq!(list_files(&fixture.0, "src").unwrap(), "src/main.rs");
+        assert_eq!(list_files(&fixture.0, "/src").unwrap(), "src/main.rs");
         assert!(list_files(&fixture.0, "README.md").is_err());
         assert!(list_files(&fixture.0, "../").is_err());
         assert!(search_content(&fixture.0, &fixture.0, "", false).is_err());
@@ -1081,12 +1100,21 @@ mod tests {
         let none = std::sync::atomic::AtomicBool::new(false);
         let read = |args: Value| execute(&settings, "read_file", &args, &none);
         assert_eq!(read(json!({"path":"README.md"})).unwrap(), "1: hello");
+        assert_eq!(read(json!({"path":"/README.md"})).unwrap(), "1: hello");
+        assert_eq!(
+            read(json!({"path":fixture.0.join("README.md").to_string_lossy()})).unwrap(),
+            "1: hello"
+        );
         assert!(read(json!({"path":"README.md","start_line":5}))
             .unwrap_err()
             .contains("only 1 lines"));
         let search = |args: Value| execute(&settings, "search_content", &args, &none);
         assert_eq!(
             search(json!({"query":"FN MAIN","ignore_case":true,"path":"src"})).unwrap(),
+            "src/main.rs:1: fn main() {}"
+        );
+        assert_eq!(
+            search(json!({"query":"FN MAIN","ignore_case":true,"path":"/src"})).unwrap(),
             "src/main.rs:1: fn main() {}"
         );
         assert!(search(json!({"query":"hello","path":"src"}))
@@ -1097,6 +1125,7 @@ mod tests {
             "README.md:1: hello"
         );
         assert!(search(json!({"query":"x","path":"../"})).is_err());
+        assert!(search(json!({"query":"x","path":"/../"})).is_err());
         assert!(execute(&settings, "delete_everything", &json!({}), &none).is_err());
     }
 
@@ -1284,7 +1313,7 @@ mod deletion_tests {
         }
         assert!(delete_path(&root, ".", true).is_err());
         assert!(delete_path(&root, "../outside", true).is_err());
-        delete_path(&root, "nested/file", false).unwrap();
+        delete_path(&root, "/nested/file", false).unwrap();
         fs::write(root.join("nested/another"), "x").unwrap();
         delete_path(&root, "nested", true).unwrap();
         assert!(root.exists());
@@ -1416,6 +1445,16 @@ mod discovery_edit_tests {
         assert!(discover(&root, "glob", &json!({"pattern":"**/*.rs"}))
             .unwrap()
             .contains("src/main.rs"));
+        assert!(discover(&root, "glob", &json!({"pattern":"/src/*.rs"}))
+            .unwrap()
+            .contains("src/main.rs"));
+        assert!(discover(
+            &root,
+            "grep",
+            &json!({"pattern":"value", "include":"/src/**"})
+        )
+        .unwrap()
+        .contains("src/main.rs:2:"));
         assert!(discover(&root, "grep", &json!({"pattern":"["})).is_err());
         fs::remove_dir_all(root).unwrap();
     }

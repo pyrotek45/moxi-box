@@ -31,7 +31,7 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 
 Tool steps appear live in the reply, in order, with plain titles such as "Read src/main.rs" or "Edited src/app.rs". Expand a step to see its result; edits show a red/green diff. Approve runs an operation once; Deny stops the run. **Auto-approve** (Agent mode header or Settings) runs edits, writes, commands, and memory notes without asking for the rest of the session. Send while Moxi works to queue a message: the agent reads it after its current tool round. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
 
-File tools reject traversal and symlink escapes. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Command output and model-facing tool observations are capped to keep memory and context bounded. Agent runs stop after sixteen model/tool rounds; send a follow-up to continue.
+File tools reject traversal and symlink escapes. Paths normally look like `essays/file.md`; a leading slash such as `/essays/file.md` is accepted as workspace-root shorthand and never grants OS-root access. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Command output and model-facing tool observations are capped to keep memory and context bounded. Agent runs stop after sixteen model/tool rounds; send a follow-up to continue.
 
 ## Workspaces, summaries, and memory
 
