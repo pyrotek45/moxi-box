@@ -16,11 +16,17 @@ impl MoxiBoxApp {
                 ScrollArea::vertical().id_salt("settings_body").max_height(height - 60.0).show(ui, |ui| {
                     egui::CollapsingHeader::new("Workspace").default_open(true).show(ui, |ui| {
                     ui.add(egui::Label::new(if self.settings.workspace_root.is_empty() { "No folder attached" } else { &self.settings.workspace_root }).wrap());
+                    ui.label(RichText::new("Attach selects one local folder for this workspace. Moxi can work only inside that folder; files are not copied or uploaded.").small().color(TEXT_MUTED));
+                    egui::CollapsingHeader::new("How folder access works").default_open(self.settings.workspace_root.is_empty()).show(ui, |ui| {
+                        ui.label(RichText::new("• Read and search are automatic.\n• Edits, new files, deletion, and commands ask for approval unless Auto-approve is on.\n• Detach removes Moxi's link to the folder and leaves every file in place.\n• Deleting a workspace removes its chat, memory, and tasks; its files stay on disk.\n• Reset folder archives the entire folder beside the original, then recreates it empty.").small().color(TEXT_MUTED));
+                        ui.label(RichText::new("To work with one file, attach the folder that contains it. Moxi does not upload individual files.").small().color(TEXT_MUTED));
+                    });
+                    ui.add_space(4.0);
                     ui.add_enabled_ui(self.idle(), |ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
-                            if settings_action(ui, "Attach / change").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::Attach, context); close = true; }
-                            if settings_action(ui, "New folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::NewFolderParent, context); close = true; }
+                            if settings_action(ui, "Attach or change folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::Attach, context); close = true; }
+                            if settings_action(ui, "Create and attach folder").clicked() { self.pick_folder(crate::app::workspaces::FolderPick::NewFolderParent, context); close = true; }
                             if !self.settings.workspace_root.is_empty() {
                                 if settings_action(ui, "Detach").clicked() { self.attach_folder(String::new(), false); }
                                 if settings_action(ui, "Reset folder").clicked() { self.workspace_name.clear(); self.workspace_error = None; self.workspace_dialog = Some(crate::app::workspaces::WorkspaceDialog::Reset); close = true; }
