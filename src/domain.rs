@@ -186,8 +186,10 @@ pub enum AppCommand {
         path: String,
         create: bool,
     },
+    /// Scan the sidebar tree: the root level plus every expanded folder.
     BrowseWorkspace {
         root: String,
+        expanded: Vec<String>,
     },
     ReadPreview {
         root: String,
@@ -241,6 +243,8 @@ pub enum AppEvent {
         entries: Vec<WorkspaceEntry>,
     },
     /// Workspace memory and shared playbook after the agent saved a note.
+    /// Files may have changed (an agent write or command); rescan the tree now.
+    WorkspaceChanged,
     MemoryUpdated {
         memory: String,
         playbook: String,

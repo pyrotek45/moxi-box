@@ -17,13 +17,10 @@ pub(super) fn prepare(
         + workspace.len()
         + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
     let (mut summary, through) = store.summary()?;
+    let tool_record = tools_used_note(&state.messages, &state.activity, through);
     let mut recent = state
         .messages
         .into_iter()
-        .map(|mut message| {
-            note_tools_used(&mut message, &state.activity);
-            message
-        })
         .filter(|message| {
             message.id > through
                 && !message.content.trim().is_empty()
@@ -71,25 +68,55 @@ pub(super) fn prepare(
         &summary,
         &workspace,
     );
+    history.extend(tool_record.map(|content| ChatMessage {
+        id: 0,
+        role: MessageRole::System,
+        content,
+    }));
     history.extend(recent);
     Ok(history)
 }
 
-/// Earlier replies carry a short record of the tools they ran, so later turns know
-/// which files were read or changed without replaying full tool output.
-fn note_tools_used(message: &mut ChatMessage, activity: &[crate::domain::AgentActivity]) {
-    if message.role != MessageRole::Assistant {
-        return;
+/// A record of the tools earlier replies ran, so later turns know which files were read or
+/// changed without replaying tool output. It lives in the system message, never inside the
+/// replies: small models copied an inline "[Tools used: ...]" line as their whole answer.
+fn tools_used_note(
+    messages: &[ChatMessage],
+    activity: &[crate::domain::AgentActivity],
+    through: i64,
+) -> Option<String> {
+    let mut request = "";
+    let mut lines = Vec::new();
+    for message in messages {
+        if message.role == MessageRole::User {
+            request = &message.content;
+            continue;
+        }
+        if message.role != MessageRole::Assistant || message.id <= through {
+            continue;
+        }
+        let steps = activity
+            .iter()
+            .filter(|step| step.message_id == message.id && step.call_id != "reasoning")
+            .map(|step| step.title.chars().take(120).collect::<String>())
+            .take(12)
+            .collect::<Vec<_>>();
+        if !steps.is_empty() {
+            let asked = request
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            lines.push(format!("- For \"{asked}\": {}", steps.join("; ")));
+        }
     }
-    let steps = activity
-        .iter()
-        .filter(|step| step.message_id == message.id)
-        .map(|step| step.title.chars().take(120).collect::<String>())
-        .take(12)
-        .collect::<Vec<_>>();
-    if !steps.is_empty() {
-        message.content = format!("[Tools used: {}]\n\n{}", steps.join("; "), message.content);
+    if lines.is_empty() {
+        return None;
     }
+    let recent = lines.split_off(lines.len().saturating_sub(10));
+    Some(format!("Tool steps already taken in earlier turns (Moxi's record for your reference; never write lines like these in a reply, call the tools instead):\n{}", recent.join("\n")))
 }
 
 /// Memory, the task checklist, and the summary are context for the model, folded into
@@ -396,23 +423,22 @@ mod tests {
             step(2, "Edited src/app.rs"),
             step(9, "Other"),
         ];
-        let mut reply = ChatMessage {
-            id: 2,
-            role: MessageRole::Assistant,
-            content: String::new(),
+        let message = |id, role, content: &str| ChatMessage {
+            id,
+            role,
+            content: content.into(),
         };
-        note_tools_used(&mut reply, &activity);
-        assert_eq!(
-            reply.content,
-            "[Tools used: Read src/main.rs; Edited src/app.rs]\n\n"
-        );
-        let mut question = ChatMessage {
-            id: 2,
-            role: MessageRole::User,
-            content: "hi".into(),
-        };
-        note_tools_used(&mut question, &activity);
-        assert_eq!(question.content, "hi");
+        let messages = [
+            message(1, MessageRole::User, "fix the parser\nplease"),
+            message(2, MessageRole::Assistant, ""),
+            message(3, MessageRole::User, "thanks"),
+            message(4, MessageRole::Assistant, "You're welcome."),
+        ];
+        let note = tools_used_note(&messages, &activity, 0).unwrap();
+        assert!(note.ends_with("- For \"fix the parser\": Read src/main.rs; Edited src/app.rs"));
+        assert!(note.contains("never write lines like these"));
+        // Compacted replies are summarized elsewhere; nothing to record.
+        assert!(tools_used_note(&messages, &activity, 2).is_none());
     }
 
     #[test]

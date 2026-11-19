@@ -14,6 +14,8 @@ const MAX_LISTED_FILES: usize = 300;
 const MAX_TREE_ENTRIES: usize = 2000;
 /// Per-folder cap so one huge folder cannot starve its siblings' contents.
 const MAX_FOLDER_ENTRIES: usize = 300;
+/// The sidebar lists only open folders, so each can show far more.
+const MAX_TREE_FOLDER_ENTRIES: usize = 5000;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
@@ -303,6 +305,57 @@ pub fn execute(
     arguments: &Value,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<String, String> {
+    let result = dispatch(settings, name, arguments, cancelled)?;
+    if !matches!(name, "write_file" | "edit_file" | "replace_all") {
+        return Ok(result);
+    }
+    // Check the changed file at once, as SWE-agent and Aider do: catching a syntax error
+    // right after the edit is far easier for a model than finding it later from a traceback.
+    let path = ["path", "file_path", "filePath"]
+        .iter()
+        .find_map(|key| arguments[*key].as_str())
+        .unwrap_or_default();
+    let root = canonical_root(&settings.workspace_root)?;
+    Ok(match safe_path(&root, path, false).ok().and_then(|file| syntax_problem(&file)) {
+        Some(problem) => format!("{result}\n\nWARNING: the file was saved, but it now has a syntax error:\n{problem}\nRead the lines around the error and fix them before doing anything else."),
+        None => result,
+    })
+}
+
+/// A syntax error in a changed Python or JSON file, or None when it parses or cannot be checked.
+pub fn syntax_problem(file: &Path) -> Option<String> {
+    let extension = file.extension()?.to_str()?.to_ascii_lowercase();
+    let text = fs::read_to_string(file).ok()?;
+    let problem = match extension.as_str() {
+        "json" => serde_json::from_str::<Value>(&text)
+            .err()
+            .map(|error| format!("JSON: {error}")),
+        "py" => {
+            // ast.parse checks syntax without running the code or writing __pycache__.
+            let output = Command::new("python3")
+                .args([
+                    "-I",
+                    "-c",
+                    "import ast,sys\ntry:\n ast.parse(open(sys.argv[1],encoding='utf-8').read(),sys.argv[1])\nexcept SyntaxError as e:\n print(f'line {e.lineno}: {e.msg}'+(f'\\n    {e.text.rstrip()}' if e.text else ''));sys.exit(1)",
+                ])
+                .arg(file)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            (!output.status.success())
+                .then(|| format!("Python {}", String::from_utf8_lossy(&output.stdout).trim()))
+        }
+        _ => None,
+    }?;
+    Some(problem.chars().take(600).collect())
+}
+
+fn dispatch(
+    settings: &Settings,
+    name: &str,
+    arguments: &Value,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
     let root = canonical_root(&settings.workspace_root)?;
     match name {
         "list_files" => list_files(
@@ -414,6 +467,57 @@ fn command_arguments(arguments: &Value) -> Result<Option<&Vec<Value>>, String> {
 pub fn workspace_entries(root: &str) -> Result<Vec<WorkspaceEntry>, String> {
     let root = canonical_root(root)?;
     collect_entries(&root, &root)
+}
+
+/// Entries for the sidebar tree: the root level and the contents of expanded folders only, so
+/// every visible folder is listed completely however large the project is. Depth-first order,
+/// folders first. Unreadable or vanished folders are skipped; only the root must be readable.
+pub fn tree_entries(root: &str, expanded: &[String]) -> Result<Vec<WorkspaceEntry>, String> {
+    fn walk(
+        root: &Path,
+        folder: &Path,
+        depth: usize,
+        expanded: &std::collections::HashSet<&str>,
+        entries: &mut Vec<WorkspaceEntry>,
+    ) -> Result<(), String> {
+        let mut children = fs::read_dir(folder)
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .filter_map(|child| {
+                let kind = child.file_type().ok()?;
+                let name = child.file_name().to_string_lossy().to_string();
+                (!kind.is_symlink() && name != ".git").then_some((
+                    kind.is_dir(),
+                    name,
+                    child.path(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|a, b| (!a.0, &a.1).cmp(&(!b.0, &b.1)));
+        for (is_directory, name, path) in children.into_iter().take(MAX_TREE_FOLDER_ENTRIES) {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            let open = is_directory && expanded.contains(relative.as_str());
+            entries.push(WorkspaceEntry {
+                path: relative,
+                name,
+                depth,
+                is_directory,
+            });
+            if open {
+                let _ = walk(root, &path, depth + 1, expanded, entries);
+            }
+        }
+        Ok(())
+    }
+    let root = canonical_root(root)?;
+    let expanded = expanded.iter().map(String::as_str).collect();
+    let mut entries = Vec::new();
+    walk(&root, &root, 0, &expanded, &mut entries)?;
+    Ok(entries)
 }
 
 pub fn preview(root: &str, path: &str) -> Result<String, String> {
@@ -1763,6 +1867,69 @@ mod edit_match_tests {
             &["replaceAll"]
         )
         .is_err());
+    }
+
+    #[test]
+    fn edits_report_syntax_errors_in_python_and_json() {
+        let fixture = Fixture::new();
+        let settings = Settings {
+            workspace_root: fixture.0.to_string_lossy().into_owned(),
+            ..Settings::default()
+        };
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let write = |path: &str, content: &str| {
+            execute(
+                &settings,
+                "write_file",
+                &json!({"path": path, "content": content}),
+                &stop,
+            )
+            .unwrap()
+        };
+        assert!(!write("ok.py", "def f():\n    return 1\n").contains("WARNING"));
+        let broken = write("bad.py", "def f(:\n    return 1\n");
+        assert!(
+            broken.contains("WARNING") && broken.contains("line 1"),
+            "{broken}"
+        );
+        assert!(fixture.0.join("bad.py").exists());
+        assert!(!fixture.0.join("__pycache__").exists());
+        assert!(write("data.json", "{\"a\": [1,}").contains("JSON"));
+        assert!(!write("notes.txt", "def f(:").contains("WARNING"));
+        let fixed = execute(
+            &settings,
+            "edit_file",
+            &json!({"path": "bad.py", "old_text": "def f(:", "new_text": "def f():"}),
+            &stop,
+        )
+        .unwrap();
+        assert!(!fixed.contains("WARNING"), "{fixed}");
+    }
+
+    #[test]
+    fn sidebar_tree_lists_open_folders_completely() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("big/inner")).unwrap();
+        for index in 0..(MAX_TREE_ENTRIES + 10) {
+            fs::write(fixture.0.join(format!("big/f{index:05}")), "").unwrap();
+        }
+        fs::write(fixture.0.join("big/inner/deep.txt"), "").unwrap();
+        fs::write(fixture.0.join("zz_last.txt"), "").unwrap();
+        let root = fixture.0.to_str().unwrap();
+        let closed = tree_entries(root, &[]).unwrap();
+        assert_eq!(
+            closed.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            ["big", "zz_last.txt"]
+        );
+        let open = tree_entries(root, &["big".into(), "big/inner".into()]).unwrap();
+        // Every file in an open folder is listed, beyond the agent snapshot's cap.
+        assert_eq!(open.len(), 2 + 1 + 1 + MAX_TREE_ENTRIES + 10);
+        assert_eq!(open[1].path, "big/inner");
+        assert_eq!(open[2].path, "big/inner/deep.txt");
+        assert_eq!(open[2].depth, 2);
+        assert_eq!(open.last().unwrap().path, "zz_last.txt");
+        // A vanished expanded folder is simply absent.
+        assert!(tree_entries(root, &["gone".into()]).is_ok());
     }
 
     #[test]

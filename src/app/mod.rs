@@ -66,6 +66,10 @@ pub struct MoxiBoxApp {
     approval: Option<(String, String, String)>,
     auto_approve: Arc<AtomicBool>,
     approval_forced: bool,
+    /// The composer text looks like a coding task while in Chat mode.
+    mode_hint: bool,
+    /// The user chose to send the current message in Chat mode anyway.
+    chat_confirmed: bool,
     activity: Vec<AgentActivity>,
     workspaces: Vec<Workspace>,
     workspace_id: Option<i64>,
@@ -144,6 +148,8 @@ impl MoxiBoxApp {
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
+            mode_hint: false,
+            chat_confirmed: false,
             activity: Vec::new(),
             workspaces: Vec::new(),
             workspace_id: None,
@@ -218,11 +224,14 @@ impl MoxiBoxApp {
                     self.connection_lost(reason);
                 }
                 AppEvent::WorkspaceLoaded { root, entries } => {
+                    // Any reply ends the pending scan; only one for the current folder is shown.
+                    // (A reply for an old folder used to leave the scan pending forever.)
+                    self.tree_pending = false;
                     if root == self.settings.workspace_root {
-                        self.tree_pending = false;
                         self.tree_loaded(entries);
                     }
                 }
+                AppEvent::WorkspaceChanged => self.rescan_tree_now(),
                 AppEvent::MemoryUpdated { memory, playbook } => {
                     self.memory = memory;
                     self.playbook = playbook;
@@ -369,6 +378,13 @@ impl MoxiBoxApp {
         if self.run_slash_command() {
             return;
         }
+        // Chat mode has no file tools: offer Agent mode before sending a coding request.
+        let confirmed = std::mem::take(&mut self.chat_confirmed);
+        if !self.agent_mode && !confirmed && looks_like_coding_task(&self.composer) {
+            self.mode_hint = true;
+            return;
+        }
+        self.mode_hint = false;
         if self.workspace_id.is_none() {
             self.notice = Some("Create a workspace first.".to_owned());
             return;
@@ -416,7 +432,15 @@ impl MoxiBoxApp {
                 .iter()
                 .any(|entry| entry.path == path && entry.is_directory == directory)
         };
-        self.expanded_folders.retain(|path| exists(path, true));
+        // Only folders whose parent was scanned can be known to be gone; others stay expanded.
+        let scanned = |path: &str| {
+            std::path::Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .is_none_or(|parent| parent.is_empty() || exists(&parent, true))
+        };
+        self.expanded_folders
+            .retain(|path| exists(path, true) || !scanned(path));
         if let Some((path, _)) = &self.preview {
             if exists(path, false) {
                 self.command(AppCommand::ReadPreview {
@@ -430,18 +454,26 @@ impl MoxiBoxApp {
         self.workspace_entries = entries;
     }
 
+    /// Schedule a scan on the next frame (after agent edits, attaching, or opening a folder).
+    pub(super) fn rescan_tree_now(&mut self) {
+        self.tree_requested = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    }
+
     /// Re-scan the folder every second so the tree follows edits made anywhere, including
-    /// outside Moxi Box; agent writes also push a fresh scan immediately.
+    /// outside Moxi Box. A scan that never answers is retried, so the tree cannot freeze.
     fn refresh_tree(&mut self, context: &egui::Context) {
         const INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        const STUCK: std::time::Duration = std::time::Duration::from_secs(5);
         if self.settings.workspace_root.is_empty() || self.workspace_pending || self.worker_lost {
             return;
         }
-        if !self.tree_pending && self.tree_requested.elapsed() >= INTERVAL {
+        let due = self.tree_requested.elapsed() >= INTERVAL;
+        if due && (!self.tree_pending || self.tree_requested.elapsed() >= STUCK) {
             self.tree_pending = true;
             self.tree_requested = std::time::Instant::now();
             self.command(AppCommand::BrowseWorkspace {
                 root: self.settings.workspace_root.clone(),
+                expanded: self.expanded_folders.iter().cloned().collect(),
             });
         }
         context.request_repaint_after(INTERVAL);
@@ -554,6 +586,57 @@ impl MoxiBoxApp {
             ProviderStatus::Offline
         }
     }
+}
+
+/// A rough check for requests that need files or commands; it only triggers a suggestion.
+pub(crate) fn looks_like_coding_task(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let words = text
+        .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(word));
+    const ACTIONS: &[&str] = &[
+        "create",
+        "make",
+        "write",
+        "build",
+        "fix",
+        "edit",
+        "change",
+        "refactor",
+        "implement",
+        "add",
+        "delete",
+        "remove",
+        "rename",
+        "run",
+        "install",
+        "debug",
+        "update",
+        "code",
+        "test",
+        "setup",
+        "generate",
+        "modify",
+        "compile",
+        "deploy",
+    ];
+    const TARGETS: &[&str] = &[
+        "file", "files", "script", "scripts", "code", "function", "class", "project", "app",
+        "game", "bug", "bugs", "tests", "folder", "repo", "module", "program", "venv", "website",
+        "readme", "cli", "api", "server", "codebase", "error", "crash",
+    ];
+    const EXTENSIONS: &[&str] = &[
+        ".py", ".rs", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".c", ".cpp", ".h", ".cs",
+        ".rb", ".php", ".html", ".css", ".json", ".toml", ".yaml", ".yml", ".md", ".sh", ".sql",
+    ];
+    let names_a_file = words.iter().any(|word| {
+        EXTENSIONS
+            .iter()
+            .any(|extension| word.ends_with(extension) && word.len() > extension.len())
+    });
+    names_a_file || (has(ACTIONS) && has(TARGETS))
 }
 
 #[cfg(test)]

@@ -37,7 +37,11 @@ File tools reject traversal and symlink escapes. Paths normally look like `essay
 
 A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace and asks for a name (leave it blank to name it from your first message); double-click a workspace or click the title above the chat to rename it; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
 
-Every message is sent with the workspace's earlier messages, a bounded file/folder snapshot, and applicable `AGENTS.md` or `AGENT.md` files. Root instructions apply to the whole folder; nested instructions apply to their subtree and override conflicts. Earlier agent replies carry a short "tools used" note so follow-ups know which files were read or changed.
+In Chat mode, a message that looks like a coding task (for example one naming a file or asking to fix or build something) shows a suggestion to switch to Agent mode before it is sent.
+
+After `write_file` or `edit_file` changes a Python or JSON file, Moxi checks its syntax and tells the agent at once if the change broke it (the idea comes from SWE-agent's linted edits and Aider's lint loop).
+
+Every message is sent with the workspace's earlier messages, a bounded file/folder snapshot, and applicable `AGENTS.md` or `AGENT.md` files. Root instructions apply to the whole folder; nested instructions apply to their subtree and override conflicts. A short record of the tools earlier replies used is kept in the system message so follow-ups know which files were read or changed; replies that only imitate such a status line are sent back to the model to act or answer properly.
 
 Context recovery has two modes in provider settings. **Auto** sends the full available history until the provider explicitly reports that context is too large, then summarizes older turns, records a conservative working limit for that workspace, and retries. **Manual** uses the token budget you set and compacts proactively before requests cross a conservative estimate, which can be steadier for models that report context limits inconsistently. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
@@ -85,7 +89,7 @@ Queued messages wait until the current tool sequence has finished, giving the ag
 
 Chat bubbles render CommonMark formatting, including headings, emphasis, lists, links, quotes, tables, and fenced code with a copy button. Wide content scrolls horizontally within the bubble. Automatic image loading is disabled.
 
-The sidebar shows workspaces, the attached folder's file tree (rescanned every second and immediately after agent edits), tasks, and compact Memory and Goal buttons. Settings holds folder creation, detachment, and reset.
+The sidebar shows workspaces, the attached folder's file tree (the top level and every folder you open, each listed in full; rescanned every second and immediately after agent edits), tasks, and compact Memory and Goal buttons. Settings holds folder creation, detachment, and reset.
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
 

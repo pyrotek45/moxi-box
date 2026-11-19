@@ -36,6 +36,8 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
+            mode_hint: false,
+            chat_confirmed: false,
             activity: vec![],
             workspaces: vec![],
             workspace_id: None,
@@ -498,4 +500,71 @@ fn a_dropped_run_reports_and_starts_reconnecting() {
         app.connection.error.as_deref(),
         Some("Cannot reach the provider: reset")
     );
+}
+
+#[test]
+fn a_scan_for_an_old_folder_cannot_freeze_the_tree() {
+    let ((mut app, tx), commands) = fixture_with_commands();
+    let context = egui::Context::default();
+    app.settings.workspace_root = "/old".into();
+    app.rescan_tree_now();
+    app.refresh_tree(&context);
+    assert!(
+        matches!(commands.try_recv(), Ok(AppCommand::BrowseWorkspace { root, .. }) if root == "/old")
+    );
+    // The folder changes while that scan is in flight; its late reply must still end the scan.
+    app.settings.workspace_root = "/new".into();
+    tx.send(AppEvent::WorkspaceLoaded {
+        root: "/old".into(),
+        entries: vec![],
+    })
+    .unwrap();
+    app.handle_events(&context);
+    assert!(!app.tree_pending);
+    app.rescan_tree_now();
+    app.expanded_folders.insert("src".into());
+    app.refresh_tree(&context);
+    assert!(matches!(commands.try_recv(),
+        Ok(AppCommand::BrowseWorkspace { root, expanded }) if root == "/new" && expanded == ["src"]));
+    // Even a scan that never answers is retried after a few seconds.
+    app.tree_requested = std::time::Instant::now() - std::time::Duration::from_secs(6);
+    app.refresh_tree(&context);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::BrowseWorkspace { .. })
+    ));
+    tx.send(AppEvent::WorkspaceChanged).unwrap();
+    app.handle_events(&context);
+    assert!(app.tree_requested.elapsed() >= std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn coding_requests_in_chat_mode_suggest_agent_mode() {
+    use crate::app::looks_like_coding_task as coding;
+    assert!(coding("make a snake game in python"));
+    assert!(coding("fix the bug in main.py"));
+    assert!(coding("Please add tests for the parser module"));
+    assert!(!coding("hi, how are you?"));
+    assert!(!coding("what is a closure in rust?"));
+    assert!(!coding("make me a cup of tea"));
+
+    let ((mut app, _tx), commands) = fixture_with_commands();
+    app.workspace_id = Some(1);
+    app.connection.connected = true;
+    app.settings.selected_model = Some("model".into());
+    app.composer = "fix the bug in main.py".into();
+    app.send_message();
+    assert!(app.mode_hint && !app.run_pending);
+    assert_eq!(app.composer, "fix the bug in main.py");
+    assert!(commands.try_recv().is_err());
+    app.mode_hint = false;
+    app.agent_mode = true;
+    app.send_message();
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::SendChat {
+            agent_mode: true,
+            ..
+        })
+    ));
 }

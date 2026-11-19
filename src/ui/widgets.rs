@@ -319,12 +319,8 @@ pub fn reasoning_picker(ui: &mut egui::Ui, level: &mut u8) -> bool {
     let before = *level;
     let index = (*level).min(3) as usize;
     egui::ComboBox::from_id_salt("reasoning_level")
-        .selected_text(if index == 0 {
-            "Reasoning off".to_owned()
-        } else {
-            format!("Reasoning: {}", REASONING_LEVELS[index])
-        })
-        .width(130.0)
+        .selected_text(format!("Think: {}", REASONING_LEVELS[index]))
+        .width(104.0)
         .show_ui(ui, |ui| {
             for (value, label) in REASONING_LEVELS.iter().enumerate() {
                 ui.selectable_value(level, value as u8, *label);

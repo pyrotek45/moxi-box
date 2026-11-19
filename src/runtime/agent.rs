@@ -61,6 +61,7 @@ pub(super) fn run_agent(
     let mut gate = TaskGate::default();
     let mut repeats = Repeats::default();
     let mut recoveries = 0;
+    let mut status_corrections = 0;
     if let Err(error) = reason(
         store,
         runtime,
@@ -223,7 +224,9 @@ pub(super) fn run_agent(
                 };
                 match outcome {
                     Ok(Some((mut observation, success))) => {
-                        if !blocked_memory {
+                        // Only failed changes need a recovery check; a failed read or web fetch is
+                        // already visible to the model, and re-prompting about it confuses it.
+                        if !blocked_memory && tools::requires_approval(&call.name) {
                             recovery.observe(&call.name, success);
                         }
                         if repeated >= REPEAT_WARNING && index + 1 == response.tool_calls.len() {
@@ -238,6 +241,21 @@ pub(super) fn run_agent(
                     Err(error) => return fail_run(store, events, error),
                 }
             }
+        }
+        if response.tool_calls.is_empty()
+            && status_only(&response.content)
+            && status_corrections < 2
+        {
+            // The model wrote a status line ("[Updated task list]") instead of acting or
+            // answering. Tell it what went wrong rather than ending the run on a non-answer.
+            status_corrections += 1;
+            messages.push(serde_json::json!({"role":"user","content":"Harness check: your last reply was only a bracketed status line, which does nothing. Nothing was run and no tool was called. To act, call the tool itself (for example update_tasks, read_file, or run_command). If the work is finished, reply with a normal short summary of what you did and what remains."}));
+            let _ = reply.push(
+                store,
+                events,
+                "*Recovery: the reply was only a status line, so the agent was asked to act or answer properly.*",
+            );
+            continue;
         }
         if response.tool_calls.is_empty() {
             if let Some(instruction) = recovery.follow_up() {
@@ -395,6 +413,17 @@ fn reason(
         }
     }
     record(&step)
+}
+
+/// True for a reply made only of bracketed status lines such as "[Tools used: ...]" or
+/// "[Updated task list]": an imitation of harness notes, not an answer.
+fn status_only(content: &str) -> bool {
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .peekable();
+    lines.peek().is_some() && lines.all(|line| line.starts_with('[') && line.ends_with(']'))
 }
 
 /// Apply sidebar task edits made during a run before the next model turn; other commands stay
@@ -788,15 +817,7 @@ impl Tool<'_> {
                 let result = tools::execute(self.settings, name, &call.arguments, self.cancelled);
                 if tools::requires_approval(name) {
                     // Writes and commands can change the tree shown in the sidebar.
-                    if let Ok(entries) = tools::workspace_entries(&self.settings.workspace_root) {
-                        send(
-                            self.events,
-                            AppEvent::WorkspaceLoaded {
-                                root: self.settings.workspace_root.clone(),
-                                entries,
-                            },
-                        );
-                    }
+                    send(self.events, AppEvent::WorkspaceChanged);
                 }
                 result
             }
@@ -1170,6 +1191,58 @@ mod run_tests {
                 .clone();
             assert_eq!(reply, "Hi there!");
         }
+    }
+
+    #[test]
+    fn status_line_replies_are_corrected_not_accepted() {
+        assert!(status_only("[Updated task list]"));
+        assert!(status_only("  [Tools used: Listed files; Read a.py]\n\n"));
+        assert!(!status_only("Done. [see notes]"));
+        assert!(!status_only(""));
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "[Updated task list]"}),
+            serde_json::json!({"content": "Updated the plan and finished."}),
+        ]);
+        let store = Store::in_memory();
+        run(&store, url, false);
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[1].contains("only a bracketed status line"));
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(reply.ends_with("Updated the plan and finished."), "{reply}");
+    }
+
+    #[test]
+    fn a_failed_web_fetch_does_not_trigger_recovery_prompts() {
+        let fetch = serde_json::json!({"content": null, "tool_calls": [{
+            "id": "call00003", "type": "function",
+            "function": {"name": "fetch_url", "arguments": "{\"url\":\"https://example.com\"}"}
+        }]});
+        let (url, server) = mock_provider(vec![
+            fetch,
+            serde_json::json!({"content": "I could not load live weather."}),
+        ]);
+        let store = Store::in_memory();
+        run(&store, url, true);
+        let bodies = server.join().unwrap();
+        // The answer ends the run: no "Harness recovery check" turns about the failed fetch.
+        assert_eq!(bodies.len(), 2);
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(reply, "I could not load live weather.");
     }
 
     #[test]

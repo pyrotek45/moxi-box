@@ -7,7 +7,8 @@ const SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
 const MAX_RESULTS: usize = 8;
 const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PAGE_CHARS: usize = 12_000;
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) MoxiBox/0.1";
+// Many sites refuse unfamiliar clients outright, so requests look like an ordinary browser.
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -18,7 +19,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         crate::tools::definition(
             "fetch_url",
-            "Fetch an http(s) page and return its readable text, capped in length.",
+            "Fetch an http(s) page and return its readable text, capped in length. Some sites block automated readers or need JavaScript; if one fails, try another result. For current weather, fetch https://wttr.in/City+Name?format=4 (plain text, no JavaScript).",
             serde_json::json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
         ),
     ]
@@ -63,7 +64,8 @@ pub async fn fetch(url: &str) -> Result<String, String> {
         text.push_str("\n[Page truncated.]");
     }
     Ok(if text.trim().is_empty() {
-        "The page has no readable text.".to_owned()
+        "The page has no readable text; it probably needs JavaScript. Try another result."
+            .to_owned()
     } else {
         text
     })
@@ -74,12 +76,17 @@ async fn get_text(url: reqwest::Url) -> Result<String, String> {
     let response = reqwest::Client::new()
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.8")
         .send()
         .await
         .map_err(|error| format!("Web request failed: {error}"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("The site returned {status}."));
+        return Err(blocked_message(status));
     }
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
@@ -92,6 +99,16 @@ async fn get_text(url: reqwest::Url) -> Result<String, String> {
         }
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Explain an HTTP failure in terms the model can act on.
+fn blocked_message(status: reqwest::StatusCode) -> String {
+    match status.as_u16() {
+        401 | 403 | 451 => format!("The site refused automated access ({status}). Try a different search result; for weather, https://wttr.in/City+Name?format=4 works."),
+        429 => format!("The site is rate limiting requests ({status}). Try a different source."),
+        404 | 410 => format!("The page was not found ({status}). Check the URL or search again."),
+        _ => format!("The site returned {status}. Try a different source."),
+    }
 }
 
 /// (title, url, snippet) for each result on DuckDuckGo's HTML results page.
@@ -219,6 +236,13 @@ mod tests {
             "<html><head><title>T</title><style>p{}</style></head><body><script>alert(1)</script>\
             <h1>Title</h1><p>First   para &amp; more</p><div>Second<br>line</div></body></html>";
         assert_eq!(html_to_text(html), "Title\nFirst para & more\nSecond\nline");
+    }
+
+    #[test]
+    fn blocked_sites_suggest_an_alternative() {
+        let message = blocked_message(reqwest::StatusCode::FORBIDDEN);
+        assert!(message.contains("refused") && message.contains("different search result"));
+        assert!(blocked_message(reqwest::StatusCode::NOT_FOUND).contains("not found"));
     }
 
     #[test]

@@ -120,7 +120,12 @@ impl MoxiBoxApp {
         match result {
             Ok((root, entries)) => {
                 self.settings.workspace_root = root;
-                self.workspace_entries = entries;
+                self.workspace_entries = entries
+                    .into_iter()
+                    .filter(|entry| entry.depth == 0)
+                    .collect();
+                self.tree_pending = false;
+                self.rescan_tree_now();
                 self.preview = None;
                 self.workspace_dialog = None;
                 self.workspace_error = None;

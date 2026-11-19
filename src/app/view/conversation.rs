@@ -8,10 +8,13 @@ impl MoxiBoxApp {
                 egui::TopBottomPanel::bottom("composer")
                     .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8)))
                     .show_inside(ui, |ui| {
+                        if self.mode_hint && !self.agent_mode {
+                            self.mode_hint_bar(ui);
+                        }
                         let dialog_open = self.dialog_open();
                         let response = ui.add_enabled_ui(!dialog_open, |ui| widgets::composer(ui, &mut self.composer, self.agent_mode, self.run_pending, self.history.browsing())).inner;
                         if let Some(older) = response.history { self.history.navigate(&mut self.composer, older); }
-                        else if response.edited { self.history.edited(); }
+                        else if response.edited { self.history.edited(); self.mode_hint = false; }
                         if response.send { self.send_message(); }
                         if response.stop { self.stop(); }
                         ui.vertical_centered(|ui| { ui.label(RichText::new("Local models. Your workspace. You're in control.").small().color(TEXT_MUTED)); });
@@ -20,7 +23,7 @@ impl MoxiBoxApp {
                 ui.horizontal_wrapped(|ui| {
                     let title = self.workspaces.iter().find(|workspace| Some(workspace.id) == self.workspace_id).map_or("Moxi".to_owned(), |workspace| workspace.name.clone());
                     // Leave room for the mode buttons beside a long workspace name.
-                    let room = (ui.available_width() - 330.0).max(80.0);
+                    let room = (ui.available_width() - 300.0).max(60.0);
                     ui.scope(|ui| {
                         ui.set_max_width(room);
                         if ui.add(egui::Label::new(RichText::new(if self.preview.is_some() { "File preview" } else { title.as_str() }).heading()).truncate().sense(egui::Sense::click())).on_hover_text(format!("{title}\nClick to rename")).clicked() && self.preview.is_none() { rename = true; }
