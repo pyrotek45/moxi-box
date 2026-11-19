@@ -77,6 +77,29 @@ impl Store {
         Ok(())
     }
 
+    /// Deleting a task that is already gone (for example, replaced by the agent) is not an error.
+    pub fn delete_task(&self, id: i64) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM tasks WHERE id=?1 AND workspace=?2",
+                params![id, self.scope()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn clear_tasks(&self, completed_only: bool) -> Result<(), String> {
+        let sql = if completed_only {
+            "DELETE FROM tasks WHERE workspace=?1 AND status='completed'"
+        } else {
+            "DELETE FROM tasks WHERE workspace=?1"
+        };
+        self.connection
+            .execute(sql, [self.scope()])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn replace_tasks(&self, arguments: &serde_json::Value) -> Result<Vec<Task>, String> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -165,6 +188,42 @@ fn validate_title(title: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn goals_are_per_workspace() {
+        let store = Store::in_memory();
+        let home = store.current.get();
+        store.save_goal("  Ship the CLI ").unwrap();
+        store.create_named_workspace("Other").unwrap();
+        assert_eq!(store.goal().unwrap(), "");
+        store.select(home).unwrap();
+        assert_eq!(store.conversation_state().unwrap().goal, "Ship the CLI");
+        store.save_goal("").unwrap();
+        assert_eq!(store.goal().unwrap(), "");
+    }
+
+    #[test]
+    fn delete_and_clear_tasks_stay_in_the_workspace() {
+        let store = Store::in_memory();
+        let first = store.add_task("one").unwrap();
+        store.add_task("two").unwrap();
+        store.set_task_complete(first.id, true).unwrap();
+        let home = store.current.get();
+        store.create_named_workspace("Other").unwrap();
+        let other = store.current.get();
+        store.add_task("elsewhere").unwrap();
+        store.select(home).unwrap();
+        store.clear_tasks(true).unwrap();
+        assert_eq!(store.tasks().unwrap().len(), 1);
+        store.delete_task(first.id).unwrap();
+        let remaining = store.tasks().unwrap()[0].id;
+        store.delete_task(remaining).unwrap();
+        assert!(store.tasks().unwrap().is_empty());
+        store.select(other).unwrap();
+        assert_eq!(store.tasks().unwrap()[0].title, "elsewhere");
+        store.clear_tasks(false).unwrap();
+        assert!(store.tasks().unwrap().is_empty());
+    }
 
     #[test]
     fn batches_complete_many_tasks_and_invalid_batches_preserve_plan() {
