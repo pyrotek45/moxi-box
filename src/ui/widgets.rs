@@ -331,6 +331,39 @@ pub fn reasoning_picker(ui: &mut egui::Ui, level: &mut u8) -> bool {
     *level != before
 }
 
+/// The agent's multiple-choice question; returns the option the user clicked.
+pub fn question_card(ui: &mut egui::Ui, question: &str, options: &[String]) -> Option<String> {
+    let mut chosen = None;
+    card().show(ui, |ui| {
+        ui.label(
+            RichText::new("Moxi needs your input")
+                .small()
+                .color(Color32::LIGHT_YELLOW),
+        );
+        ui.add(egui::Label::new(RichText::new(question).strong()).wrap());
+        ui.add_space(6.0);
+        ui.spacing_mut().item_spacing.y = 6.0;
+        for (index, option) in options.iter().enumerate() {
+            let button =
+                egui::Button::new(RichText::new(format!("{}.  {option}", index + 1)).color(TEXT))
+                    .fill(SURFACE)
+                    .corner_radius(8.0)
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(68)))
+                    .wrap()
+                    .min_size(egui::vec2(ui.available_width(), 32.0));
+            if ui.add(button).clicked() {
+                chosen = Some(option.clone());
+            }
+        }
+        ui.label(
+            RichText::new("Or type your own answer below and press Send.")
+                .small()
+                .color(TEXT_MUTED),
+        );
+    });
+    chosen
+}
+
 /// A painted folder icon button.
 pub fn folder_button(ui: &mut egui::Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
@@ -863,6 +896,7 @@ pub fn composer(
     text: &mut String,
     agent_mode: bool,
     working: bool,
+    answering: bool,
     browsing_history: bool,
 ) -> ComposerResponse {
     let mut send = false;
@@ -906,7 +940,9 @@ pub fn composer(
                             .id(input_id)
                             .desired_rows(2)
                             .frame(false)
-                            .hint_text(if agent_mode {
+                            .hint_text(if answering {
+                                "Type your own answer…"
+                            } else if agent_mode {
                                 "Describe a coding task…  (/help for commands)"
                             } else {
                                 "Message your local model…  (/help for commands)"
@@ -929,7 +965,13 @@ pub fn composer(
                     send = ui
                         .add_enabled(
                             !text.trim().is_empty(),
-                            primary_button(if working { "Queue" } else { "Send" }),
+                            primary_button(if answering {
+                                "Answer"
+                            } else if working {
+                                "Queue"
+                            } else {
+                                "Send"
+                            }),
                         )
                         .clicked()
                         || (shortcut && !text.trim().is_empty());

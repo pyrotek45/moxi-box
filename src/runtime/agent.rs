@@ -4,7 +4,7 @@ use lm_studio::ToolCall;
 
 const MAX_OBSERVATION_BYTES: usize = 4000;
 /// Tools offered in Chat mode, besides web tools when Web access is on.
-const CHAT_TOOLS: [&str; 2] = ["list_tasks", "update_tasks"];
+const CHAT_TOOLS: [&str; 3] = ["list_tasks", "update_tasks", "ask_user"];
 /// Identical consecutive tool rounds before the model is warned, and before recovery mode.
 const REPEAT_WARNING: usize = 3;
 const REPEAT_RECOVERY: usize = 5;
@@ -335,6 +335,7 @@ fn reason(
     };
     record(&step)?;
     let mut thoughts = Vec::new();
+    let mut skipped = "";
     for pass in 1..=passes {
         let instruction = if pass == 1 {
             format!("[Think before acting (step 1 of {passes}). Do not call tools and do not answer yet. In a few short bullet points: what exactly is being asked, what you need to inspect first, whether it needs a multi-step plan (list the steps) or is a single quick action, the main risk, and how you will verify the result. If the message is a greeting or a trivial question, reply with only the word SIMPLE.]")
@@ -382,6 +383,11 @@ fn reason(
             .trim_matches(|c: char| !c.is_alphanumeric())
             .eq_ignore_ascii_case("simple");
         if thought.is_empty() || simple {
+            skipped = if simple {
+                "simple request"
+            } else {
+                "no visible thoughts"
+            };
             break;
         }
         messages.push(serde_json::json!({"role":"assistant","content":thought}));
@@ -391,7 +397,7 @@ fn reason(
     *messages = original;
     step.running = false;
     if thoughts.is_empty() {
-        step.title = "Thinking skipped: simple request".to_owned();
+        step.title = format!("Thinking skipped: {skipped}");
     } else {
         step.title = format!(
             "Thought it through ({} step{})",
@@ -657,6 +663,9 @@ impl Tool<'_> {
         call: &ToolCall,
     ) -> Result<Option<(String, bool)>, String> {
         self.check_cancelled()?;
+        if call.name == "ask_user" {
+            return self.ask(commands, deferred, call);
+        }
         // Commands that may reach outside the folder always need a person, even with Auto-approve.
         let escapes = if call.name == "run_command" {
             tools::command_escapes(&self.settings.workspace_root, &call.arguments)
@@ -731,6 +740,55 @@ impl Tool<'_> {
                 bounded(observation)
             },
             success,
+        )))
+    }
+
+    /// Show a multiple-choice question and wait for the user's answer (or Stop).
+    fn ask(
+        &self,
+        commands: &Receiver<AppCommand>,
+        deferred: &mut VecDeque<AppCommand>,
+        call: &ToolCall,
+    ) -> Result<Option<(String, bool)>, String> {
+        let (question, options) = match tools::question_arguments(&call.arguments) {
+            Ok(question) => question,
+            Err(error) => return self.reject(call, &error),
+        };
+        let mut step = AgentActivity {
+            message_id: self.message_id,
+            offset: self.offset,
+            call_id: call.id.clone(),
+            title: "Waiting for your answer".to_owned(),
+            detail: format!(
+                "{question}\n{}",
+                options
+                    .iter()
+                    .map(|option| format!("- {option}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            running: true,
+        };
+        self.record(&step)?;
+        send(
+            self.events,
+            AppEvent::QuestionAsked {
+                request_id: call.id.clone(),
+                question: question.clone(),
+                options,
+            },
+        );
+        let answer = wait_for_answer(commands, deferred, &call.id, self.cancelled)?;
+        step.running = false;
+        step.title = format!(
+            "You answered: {}",
+            answer.chars().take(80).collect::<String>()
+        );
+        step.detail = format!("{question}\n\nAnswer: {answer}");
+        self.record(&step)?;
+        Ok(Some((
+            format!("The user answered your question \"{question}\": {answer}"),
+            true,
         )))
     }
 
@@ -873,6 +931,42 @@ fn bounded_command(observation: String) -> String {
         tail - head,
         &observation[tail..]
     )
+}
+
+fn wait_for_answer(
+    commands: &Receiver<AppCommand>,
+    deferred: &mut VecDeque<AppCommand>,
+    request_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    // An answer may already have been moved aside while task edits were applied.
+    if let Some(index) = deferred.iter().position(|command| {
+        matches!(command, AppCommand::AnswerQuestion { request_id: id, answer } if id == request_id && !answer.trim().is_empty())
+    }) {
+        if let Some(AppCommand::AnswerQuestion { answer, .. }) = deferred.remove(index) {
+            return Ok(answer.trim().to_owned());
+        }
+    }
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Stopped by user.".to_owned());
+        }
+        let command = match commands.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(command) => command,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => return Err("Agent question channel closed.".to_owned()),
+        };
+        match command {
+            AppCommand::AnswerQuestion {
+                request_id: received,
+                answer,
+            } if received == request_id && !answer.trim().is_empty() => {
+                return Ok(answer.trim().to_owned())
+            }
+            AppCommand::AnswerQuestion { .. } | AppCommand::ResolveApproval { .. } => {}
+            command => deferred.push_back(command),
+        }
+    }
 }
 
 fn wait_for_approval(
@@ -1028,12 +1122,26 @@ mod run_tests {
     }
 
     fn run_with(store: &Store, url: String, chat: bool, reasoning: u8) -> Vec<AppEvent> {
+        run_queued(store, url, chat, reasoning, Vec::new())
+    }
+
+    /// Run with commands already waiting, as if the user acted while the agent worked.
+    fn run_queued(
+        store: &Store,
+        url: String,
+        chat: bool,
+        reasoning: u8,
+        queued: Vec<AppCommand>,
+    ) -> Vec<AppEvent> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let events = EventSender {
             channel: sender,
             wake: Box::new(|| {}),
         };
-        let (_commands_tx, commands) = std::sync::mpsc::channel();
+        let (commands_tx, commands) = std::sync::mpsc::channel();
+        for command in queued {
+            commands_tx.send(command).unwrap();
+        }
         let settings = Settings {
             lm_studio_url: url,
             selected_model: Some("mock".into()),
@@ -1055,6 +1163,50 @@ mod run_tests {
             &AtomicBool::new(false),
         );
         receiver.try_iter().collect()
+    }
+
+    #[test]
+    fn the_agent_can_ask_a_multiple_choice_question() {
+        let ask = |id: &str, arguments: Value| {
+            serde_json::json!({"content": null, "tool_calls": [{
+                "id": id, "type": "function",
+                "function": {"name": "ask_user", "arguments": arguments.to_string()}
+            }]})
+        };
+        for chat in [false, true] {
+            let (url, server) = mock_provider(vec![
+                ask(
+                    "call00009",
+                    serde_json::json!({"question": "Only one?", "options": ["a"]}),
+                ),
+                ask(
+                    "call00010",
+                    serde_json::json!({"question": "Which language?", "options": ["Python", "Rust"]}),
+                ),
+                serde_json::json!({"content": "Great, Rust it is."}),
+            ]);
+            let store = Store::in_memory();
+            let events = run_queued(
+                &store,
+                url,
+                chat,
+                0,
+                vec![AppCommand::AnswerQuestion {
+                    request_id: "call00010".into(),
+                    answer: "Rust".into(),
+                }],
+            );
+            let bodies = server.join().unwrap();
+            assert_eq!(bodies.len(), 3);
+            // A malformed question is rejected with guidance instead of waiting forever.
+            assert!(bodies[1].contains("2 to 6 distinct options"));
+            assert!(bodies[2].contains("The user answered your question"));
+            assert!(bodies[2].contains("Which language?") && bodies[2].contains(": Rust"));
+            assert!(events.iter().any(|event| matches!(event,
+                AppEvent::QuestionAsked { options, .. } if options == &["Python", "Rust"])));
+            assert!(events.iter().any(|event| matches!(event,
+                AppEvent::ToolActivity(step) if step.title == "You answered: Rust")));
+        }
     }
 
     #[test]

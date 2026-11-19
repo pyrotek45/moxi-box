@@ -275,7 +275,7 @@ fn handle(
             )
         }
         // A late click after the run ended or was stopped has nothing left to resolve.
-        AppCommand::ResolveApproval { .. } => {}
+        AppCommand::ResolveApproval { .. } | AppCommand::AnswerQuestion { .. } => {}
     }
 }
 

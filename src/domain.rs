@@ -217,6 +217,11 @@ pub enum AppCommand {
         request_id: String,
         approved: bool,
     },
+    /// The user's answer to an ask_user question: one of the choices or their own text.
+    AnswerQuestion {
+        request_id: String,
+        answer: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +279,12 @@ pub enum AppEvent {
         preview: String,
         /// Needs a person even with Auto-approve on (a command that may leave the workspace).
         forced: bool,
+    },
+    /// The agent asked a multiple-choice question and waits for AnswerQuestion.
+    QuestionAsked {
+        request_id: String,
+        question: String,
+        options: Vec<String>,
     },
     TasksUpdated(Vec<Task>),
     Notice(String),

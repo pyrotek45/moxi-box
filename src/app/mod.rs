@@ -66,6 +66,10 @@ pub struct MoxiBoxApp {
     approval: Option<(String, String, String)>,
     auto_approve: Arc<AtomicBool>,
     approval_forced: bool,
+    /// Why the last Send could not go out; shown as a warning above the composer.
+    send_blocked: Option<SendBlocked>,
+    /// (request id, question, options) of an ask_user call waiting for the user.
+    question: Option<(String, String, Vec<String>)>,
     /// The composer text looks like a coding task while in Chat mode.
     mode_hint: bool,
     /// The user chose to send the current message in Chat mode anyway.
@@ -148,6 +152,8 @@ impl MoxiBoxApp {
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
+            send_blocked: None,
+            question: None,
             mode_hint: false,
             chat_confirmed: false,
             activity: Vec::new(),
@@ -280,6 +286,7 @@ impl MoxiBoxApp {
                     }
                 }
                 AppEvent::ChatFinished { id } => {
+                    self.question = None;
                     if self.streaming_id == Some(id) {
                         self.streaming_id = None;
                     }
@@ -343,6 +350,14 @@ impl MoxiBoxApp {
                     self.approval_forced = forced;
                     self.approval = Some((request_id, summary, preview));
                 }
+                AppEvent::QuestionAsked {
+                    request_id,
+                    question,
+                    options,
+                } => {
+                    self.preview = None;
+                    self.question = Some((request_id, question, options));
+                }
                 AppEvent::TasksUpdated(tasks) => self.tasks = tasks,
                 AppEvent::Notice(message) => self.notice = Some(message),
                 AppEvent::Error(message) => {
@@ -357,6 +372,7 @@ impl MoxiBoxApp {
                     self.streaming_id = None;
                     self.run_pending = false;
                     self.approval = None;
+                    self.question = None;
                     if self.connection.reconnect.is_some()
                         && crate::provider::lm_studio::is_unreachable(&message)
                     {
@@ -378,6 +394,13 @@ impl MoxiBoxApp {
         if self.run_slash_command() {
             return;
         }
+        // While the agent waits on a question, typed text is the answer.
+        if self.question.is_some() {
+            let answer = std::mem::take(&mut self.composer);
+            self.history.record(&answer);
+            self.answer_question(answer);
+            return;
+        }
         // Chat mode has no file tools: offer Agent mode before sending a coding request.
         let confirmed = std::mem::take(&mut self.chat_confirmed);
         if !self.agent_mode && !confirmed && looks_like_coding_task(&self.composer) {
@@ -389,22 +412,20 @@ impl MoxiBoxApp {
             self.notice = Some("Create a workspace first.".to_owned());
             return;
         }
+        // Not ready to send: say so prominently above the composer and keep the message.
         if self.connection.reconnect.is_some() {
-            self.notice = Some(
-                "Reconnecting to the model server… Your message is kept; send it once connected."
-                    .to_owned(),
-            );
+            self.send_blocked = Some(SendBlocked::Reconnecting);
             return;
         }
         if !self.connection.connected {
-            self.notice =
-                Some("Choose a provider and click Connect before sending a message.".to_owned());
+            self.send_blocked = Some(SendBlocked::NotConnected);
             return;
         }
         if self.settings.selected_model.is_none() {
-            self.notice = Some("Load and select a model before sending a message.".to_owned());
+            self.send_blocked = Some(SendBlocked::NoModel);
             return;
         }
+        self.send_blocked = None;
         self.notice = None;
         let content = std::mem::take(&mut self.composer);
         self.history.record(&content);
@@ -505,6 +526,16 @@ impl MoxiBoxApp {
         }
     }
 
+    fn answer_question(&mut self, answer: String) {
+        if answer.trim().is_empty() {
+            return;
+        }
+        if let Some((request_id, _, _)) = self.question.take() {
+            self.activity_at = std::time::Instant::now();
+            self.command(AppCommand::AnswerQuestion { request_id, answer });
+        }
+    }
+
     fn set_auto_approve(&mut self, enabled: bool) {
         self.auto_approve
             .store(enabled, std::sync::atomic::Ordering::Release);
@@ -586,6 +617,13 @@ impl MoxiBoxApp {
             ProviderStatus::Offline
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SendBlocked {
+    NotConnected,
+    Reconnecting,
+    NoModel,
 }
 
 /// A rough check for requests that need files or commands; it only triggers a suggestion.
