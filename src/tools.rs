@@ -25,7 +25,7 @@ pub fn definitions() -> Vec<Value> {
         definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string","description":"Path inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the whole task list. Send every task to keep. One call may update or complete many tasks. Example: {\"tasks\":[{\"title\":\"Inspect code\",\"status\":\"in_progress\"}]}", json!({"type":"object","properties":{"tasks":{"type":"array","description":"Complete replacement task list","items":{"type":"object","properties":{"title":{"type":"string","description":"Short task description"},"status":{"type":"string","description":"Current task state","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
-        definition("ask_user", "Ask the user a multiple-choice question when you need a decision or missing information to continue, instead of guessing. Give 2 to 6 short, distinct options; the user can also type their own answer. Ask one question at a time and only when the answer changes what you do.", json!({"type":"object","properties":{"question":{"type":"string","description":"One clear question"},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":6,"description":"Short answer choices, for example [\"Python\", \"Rust\"]"}},"required":["question","options"]})),
+        definition("ask_user", "Ask the user one multiple-choice question and wait for the answer. Use it whenever you offer choices: a decision you need, missing information, or a quiz/trivia/poll question. Give 2 to 6 short, distinct options (the user can also type their own answer). Never write multiple-choice options as plain text; call this tool, one question per call.", json!({"type":"object","properties":{"question":{"type":"string","description":"One clear question"},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":6,"description":"Short answer choices, for example [\"Python\", \"Rust\"]"}},"required":["question","options"]})),
         definition("remember", "Save a concise durable note. scope \"workspace\" (default) keeps a fact about this project; scope \"all\" adds a general lesson to the shared playbook used in every workspace, such as how you solved a tricky problem. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["workspace","all"],"description":"workspace (default) or all"}},"required":["note"]})),
         definition(
             "list_files",
@@ -109,6 +109,9 @@ pub fn question_arguments(arguments: &Value) -> Result<(String, Vec<String>), St
     }
     Ok((question, unique))
 }
+
+/// Older tool names still accepted from saved calls, though no longer offered to the model.
+pub const LEGACY_TOOLS: [&str; 1] = ["replace_all"];
 
 pub fn requires_approval(name: &str) -> bool {
     matches!(

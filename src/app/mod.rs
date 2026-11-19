@@ -285,6 +285,12 @@ impl MoxiBoxApp {
                         message.content.push_str(&text);
                     }
                 }
+                AppEvent::ChatReplaced { id, content } => {
+                    if let Some(message) = self.messages.iter_mut().find(|message| message.id == id)
+                    {
+                        message.content = content;
+                    }
+                }
                 AppEvent::ChatFinished { id } => {
                     self.question = None;
                     if self.streaming_id == Some(id) {
