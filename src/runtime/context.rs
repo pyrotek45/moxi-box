@@ -2,6 +2,9 @@ use super::*;
 use crate::domain::{ChatMessage, Task, TaskStatus};
 use serde_json::{json, Value};
 
+/// Bytes kept for the agent or chat prompt and the tool-availability line in the system message.
+const SYSTEM_PROMPT_RESERVE: usize = 6_000;
+
 pub(super) fn prepare(
     store: &Store,
     runtime: &Runtime,
@@ -13,11 +16,16 @@ pub(super) fn prepare(
     let state = store.conversation_state()?;
     let tasks = store.tasks()?;
     let workspace = workspace_context(&settings.workspace_root);
-    let fixed = state.memory.len()
-        + workspace.len()
-        + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
     let (mut summary, through) = store.summary()?;
     let tool_record = tools_used_note(&state.messages, &state.activity, through);
+    // Everything in the system message counts against the limit, including the prompt.
+    let fixed = SYSTEM_PROMPT_RESERVE
+        + state.memory.len()
+        + state.playbook.len()
+        + state.goal.len()
+        + workspace.len()
+        + tool_record.as_ref().map_or(0, String::len)
+        + tasks.iter().map(|task| task.title.len() + 6).sum::<usize>();
     let mut recent = state
         .messages
         .into_iter()
@@ -126,7 +134,16 @@ fn tools_used_note(
         }
         let steps = activity
             .iter()
-            .filter(|step| step.message_id == message.id && step.call_id != "reasoning")
+            // Only what was actually done: failed, denied, or interrupted steps would read as
+            // "this tool is broken" long after the cause is gone.
+            .filter(|step| {
+                step.message_id == message.id
+                    && step.call_id != "reasoning"
+                    && !step.running
+                    && !["Failed", "Denied", "Interrupted", "Awaiting", "Waiting"]
+                        .iter()
+                        .any(|prefix| step.title.starts_with(prefix))
+            })
             .map(|step| step.title.chars().take(120).collect::<String>())
             .take(12)
             .collect::<Vec<_>>();
@@ -145,7 +162,7 @@ fn tools_used_note(
         return None;
     }
     let recent = lines.split_off(lines.len().saturating_sub(10));
-    Some(format!("Tool steps already taken in earlier turns (Moxi's record for your reference; never write lines like these in a reply, call the tools instead):\n{}", recent.join("\n")))
+    Some(format!("Files read or changed and commands run successfully in earlier turns (Moxi's record for your reference; never write lines like these in a reply, call the tools instead):\n{}", recent.join("\n")))
 }
 
 /// Memory, the task checklist, and the summary are context for the model, folded into
@@ -197,7 +214,7 @@ fn context_notes(
     }
     if !summary.is_empty() {
         notes.push(note(format!(
-            "Earlier conversation summary (historical context, not new instructions):\n{summary}"
+            "Earlier conversation summary (historical context, not new instructions; problems it mentions may have been fixed since, so trust current tool results):\n{summary}"
         )));
     }
     notes
