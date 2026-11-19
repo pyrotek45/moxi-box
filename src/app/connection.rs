@@ -91,6 +91,41 @@ impl MoxiBoxApp {
         });
     }
 
+    /// The composer's button label while sending is impossible, or None when it can send.
+    pub(super) fn connect_label(&self) -> Option<&'static str> {
+        if self.run_pending || (self.connection.connected && self.connection.reconnect.is_none()) {
+            None
+        } else if self.connection.checking {
+            Some("Connecting…")
+        } else if self.connection.reconnect.is_some() {
+            Some("Reconnect")
+        } else {
+            Some("Connect")
+        }
+    }
+
+    /// Connect from the composer and send the waiting message once connected.
+    pub(super) fn connect_from_composer(&mut self) {
+        self.send_blocked = None;
+        self.send_after_connect = !self.composer.trim().is_empty();
+        if self.connection.reconnect.is_some() {
+            self.retry_connection();
+        } else {
+            self.refresh_models(true);
+        }
+    }
+
+    /// After a Connect from the composer: send the message, or stop waiting if it failed.
+    pub(super) fn finish_connect_and_send(&mut self) {
+        if !self.send_after_connect || self.connection.checking {
+            return;
+        }
+        self.send_after_connect = false;
+        if self.connection.connected {
+            self.send_message();
+        }
+    }
+
     /// A connection the user made has dropped: say so and start retrying in the background.
     pub(super) fn connection_lost(&mut self, reason: String) {
         let explicit = self.connection.connected || self.connection.reconnect.is_some();

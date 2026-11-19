@@ -15,10 +15,18 @@ impl MoxiBoxApp {
                             self.mode_hint_bar(ui);
                         }
                         let dialog_open = self.dialog_open();
-                        let response = ui.add_enabled_ui(!dialog_open, |ui| widgets::composer(ui, &mut self.composer, self.agent_mode, self.run_pending, self.question.is_some(), self.history.browsing())).inner;
+                        let connect_label = self.connect_label();
+                        let context = self.context_summary();
+                        let response = ui.add_enabled_ui(!dialog_open, |ui| widgets::composer(ui, &mut self.composer, widgets::ComposerState { agent_mode: self.agent_mode, working: self.run_pending, answering: self.question.is_some(), browsing_history: self.history.browsing(), connect_label, context: &context })).inner;
                         if let Some(older) = response.history { self.history.navigate(&mut self.composer, older); }
                         else if response.edited { self.history.edited(); self.mode_hint = false; }
                         if response.send { self.send_message(); }
+                        if response.connect { self.connect_from_composer(); }
+                        if response.open_memory {
+                            // Show the shared notes first when they are what is active.
+                            self.memory_tab = usize::from(sidebar::memory_notes(&self.memory).is_empty() && !self.playbook.trim().is_empty());
+                            self.open_memory();
+                        }
                         if response.stop { self.stop(); }
                         ui.vertical_centered(|ui| { ui.label(RichText::new("Local models. Your workspace. You're in control.").small().color(TEXT_MUTED)); });
                     });

@@ -37,6 +37,7 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
             send_blocked: None,
+            send_after_connect: false,
             question: None,
             mode_hint: false,
             chat_confirmed: false,
@@ -51,6 +52,9 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             memory_draft: None,
             goal: String::new(),
             goal_draft: None,
+            skills: Vec::new(),
+            show_skills: false,
+            skill_to_delete: None,
             playbook: String::new(),
             playbook_draft: String::new(),
             memory_tab: 0,
@@ -182,6 +186,7 @@ fn switching_workspaces_follows_the_loaded_folder() {
 fn composer_actions_fit_small_and_default_windows() {
     for size in [egui::vec2(640.0, 480.0), egui::vec2(1280.0, 800.0)] {
         let (mut app, _tx) = fixture();
+        app.connection.connected = true;
         app.composer = "A long multiline message\n".repeat(20);
         app.connection.error = Some("Long provider error ".repeat(20));
         app.messages.push(ChatMessage {
@@ -651,4 +656,51 @@ fn copy_buttons_copy_the_message_without_moxi_notices() {
         crate::ui::widgets::copy_text(&message(MessageRole::User, "  fix main.py \n")),
         "fix main.py"
     );
+}
+
+#[test]
+fn the_send_button_connects_when_disconnected_and_then_sends() {
+    let ((mut app, _tx), commands) = fixture_with_commands();
+    app.workspace_id = Some(1);
+    app.settings.selected_model = Some("model".into());
+    app.composer = "hello".into();
+    assert_eq!(app.connect_label(), Some("Connect"));
+    app.connect_from_composer();
+    assert_eq!(app.connect_label(), Some("Connecting…"));
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::RefreshModels { .. })
+    ));
+    app.models_loaded(app.connection.request_id, Ok(vec!["model".into()]));
+    assert_eq!(app.connect_label(), None);
+    app.finish_connect_and_send();
+    assert!(
+        matches!(commands.try_recv(), Ok(AppCommand::SendChat { content, .. }) if content == "hello")
+    );
+    // A failed connection keeps the message and stops waiting.
+    app.run_pending = false;
+    app.connection.disconnect();
+    app.composer = "again".into();
+    app.connect_from_composer();
+    app.models_loaded(app.connection.request_id, Err("refused".into()));
+    app.finish_connect_and_send();
+    assert!(!app.send_after_connect && app.composer == "again");
+    assert_eq!(app.connect_label(), Some("Connect"));
+}
+
+#[test]
+fn active_memory_is_summarized_for_the_composer() {
+    let (mut app, _tx) = fixture();
+    assert_eq!(app.context_summary(), "");
+    app.memory = "- a\n- b\n\n- c".into();
+    app.playbook = "- shared lesson".into();
+    app.skills.push(crate::domain::Skill {
+        name: "count_lines".into(),
+        description: "Count lines".into(),
+        usage: String::new(),
+        code: "print(1)".into(),
+    });
+    assert_eq!(app.context_summary(), "Memory: 3 here · 1 shared · 1 skill");
+    app.memory.clear();
+    assert_eq!(app.context_summary(), "Memory: 1 shared · 1 skill");
 }

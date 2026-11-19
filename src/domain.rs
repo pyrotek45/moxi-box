@@ -132,6 +132,15 @@ pub struct AgentActivity {
     pub running: bool,
 }
 
+/// A saved Python script the agent can run again (see skills.rs).
+#[derive(Debug, Clone)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+    pub code: String,
+}
+
 /// One conversation with its own memory and tasks; the folder is optional.
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -170,6 +179,7 @@ pub enum AppCommand {
     SavePlaybook(String),
     ExportSettings(std::path::PathBuf),
     ImportSettings(std::path::PathBuf),
+    DeleteSkill(String),
     /// Set the workspace goal; empty clears it.
     SetGoal(String),
     SaveSettings(Settings),
@@ -255,6 +265,7 @@ pub enum AppEvent {
         playbook: String,
     },
     SettingsImported(Settings),
+    SkillsLoaded(Vec<Skill>),
     PreviewLoaded {
         path: String,
         content: String,

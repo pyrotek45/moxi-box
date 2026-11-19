@@ -968,20 +968,40 @@ pub fn message_text(ui: &mut egui::Ui, content: &str) {
 
 pub struct ComposerResponse {
     pub send: bool,
+    /// The memory summary in the footer was clicked.
+    pub open_memory: bool,
+    /// The send button was showing Connect and was pressed.
+    pub connect: bool,
     pub stop: bool,
     pub history: Option<bool>,
     pub edited: bool,
 }
 
-pub fn composer(
-    ui: &mut egui::Ui,
-    text: &mut String,
-    agent_mode: bool,
-    working: bool,
-    answering: bool,
-    browsing_history: bool,
-) -> ComposerResponse {
+/// What the composer needs to know about the app around it.
+pub struct ComposerState<'a> {
+    pub agent_mode: bool,
+    pub working: bool,
+    /// A question from the agent is waiting; the button answers it.
+    pub answering: bool,
+    pub browsing_history: bool,
+    /// Shown on the button instead of Send while not connected.
+    pub connect_label: Option<&'a str>,
+    /// The memory included in every request, e.g. "Memory: 3 here · 2 shared"; empty for none.
+    pub context: &'a str,
+}
+
+pub fn composer(ui: &mut egui::Ui, text: &mut String, state: ComposerState) -> ComposerResponse {
+    let ComposerState {
+        agent_mode,
+        working,
+        answering,
+        browsing_history,
+        connect_label,
+        context,
+    } = state;
+    let mut open_memory = false;
     let mut send = false;
+    let mut connect = false;
     let mut stop = false;
     let mut history = None;
     let mut edited = false;
@@ -1043,24 +1063,57 @@ pub fn composer(
                     .small()
                     .color(TEXT_MUTED),
                 );
+                // Memory that rides along with every message stays visible here.
+                if !context.is_empty() {
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 14.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.0, ACCENT);
+                    // Leave room for the send button and the stop button beside it.
+                    let room =
+                        (ui.available_width() - if working { 190.0 } else { 110.0 }).max(40.0);
+                    open_memory = ui
+                        .scope(|ui| {
+                            ui.set_max_width(room);
+                            ui.add(
+                                egui::Label::new(RichText::new(context).small().color(TEXT_MUTED))
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                            )
+                        })
+                        .inner
+                        .on_hover_text("Included in every message. Click to view or edit memory.")
+                        .clicked();
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    send = ui
-                        .add_enabled(
-                            !text.trim().is_empty(),
-                            primary_button(if answering {
-                                "Answer"
-                            } else if working {
-                                "Queue"
-                            } else {
-                                "Send"
-                            }),
-                        )
-                        .clicked()
-                        || (shortcut && !text.trim().is_empty());
+                    // Not connected: the button connects instead (slash commands still send).
+                    let offline = connect_label.filter(|_| !text.trim_start().starts_with('/'));
+                    if let Some(label) = offline {
+                        connect = ui
+                            .add_enabled(!label.ends_with('…'), primary_button(label))
+                            .on_hover_text(
+                                "Connect to the model server; your message is sent once connected",
+                            )
+                            .clicked()
+                            || shortcut;
+                    } else {
+                        send = ui
+                            .add_enabled(
+                                !text.trim().is_empty(),
+                                primary_button(if answering {
+                                    "Answer"
+                                } else if working {
+                                    "Queue"
+                                } else {
+                                    "Send"
+                                }),
+                            )
+                            .clicked()
+                            || (shortcut && !text.trim().is_empty());
+                    }
                     if working {
                         stop = ui.add(secondary_button("Stop")).clicked();
                     }
-                    if ui.available_width() > 190.0 && !working {
+                    if ui.available_width() > 190.0 && !working && context.is_empty() {
                         ui.label(
                             RichText::new("Up/Down history · Ctrl + Enter")
                                 .small()
@@ -1075,6 +1128,8 @@ pub fn composer(
     }
     ComposerResponse {
         send,
+        open_memory,
+        connect,
         stop,
         history,
         edited,

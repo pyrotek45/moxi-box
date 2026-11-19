@@ -60,6 +60,10 @@ pub(super) fn run_agent(
     if settings.web_access {
         definitions.extend(crate::web::definitions());
     }
+    // Skills run in the workspace folder, so they need Agent mode and an attached folder.
+    if !chat && !settings.workspace_root.is_empty() {
+        definitions.extend(crate::skills::definitions());
+    }
     // State exactly which tools exist in this run, so the model never reasons from stale errors.
     let prompt = format!(
         "{prompt}\n\nTools available in this run: {}. Web access is {}. Every tool in this list works right now. If a call failed earlier in this conversation, that was about that one call (its arguments, a missing file, no folder at the time, a denied approval, or an older version of Moxi), not a broken tool: use the tools normally and judge only by their current results.",
@@ -81,6 +85,7 @@ pub(super) fn run_agent(
     let mut recoveries = 0;
     let mut status_corrections = 0;
     let mut asked_for_tool = false;
+    let mut verified = false;
     let mut failures = FailureStreak::default();
     if let Err(error) = reason(
         store,
@@ -233,6 +238,9 @@ pub(super) fn run_agent(
                     gate.active = true;
                 }
                 let blocked_memory = call.name == "remember" && recovery.has_failed_mutation();
+                // A skill is saved only once working code has run in this run.
+                let blocked_skill =
+                    call.name == "save_skill" && (!verified || recovery.has_failed_mutation());
                 let tool = Tool {
                     store,
                     runtime,
@@ -253,6 +261,11 @@ pub(super) fn run_agent(
                     tool.reject(call, &format!("{} is not available in Chat mode. Ask the user to switch to Agent mode for file access and commands.", call.name))
                 } else if !offered && settings.workspace_root.is_empty() {
                     tool.reject(call, &format!("{} is not available: no folder is attached to this workspace, and retrying will not help. Use ask_user to ask the user to attach a folder, or continue without files.", call.name))
+                } else if blocked_skill {
+                    tool.reject(
+                        call,
+                        "The skill was not saved. Save a skill only after you have run equivalent code successfully in this run (for example with run_command python3 script.py) and any failed file or command operation is resolved. Run it first, then save it.",
+                    )
                 } else if blocked_memory {
                     tool.reject(
                         call,
@@ -267,6 +280,9 @@ pub(super) fn run_agent(
                         // already visible to the model, and re-prompting about it confuses it.
                         if !blocked_memory && tools::requires_approval(&call.name) {
                             recovery.observe(&call.name, success);
+                        }
+                        if success && matches!(call.name.as_str(), "run_command" | "run_skill") {
+                            verified = true;
                         }
                         // The same error again and again (even with varied arguments) is a loop too.
                         if failures.observe(&call.name, &observation, success) >= FAILURE_RECOVERY {
@@ -881,7 +897,7 @@ impl Tool<'_> {
         Ok(Some((
             if call.name.ends_with("_tasks") {
                 observation
-            } else if call.name == "run_command" {
+            } else if matches!(call.name.as_str(), "run_command" | "run_skill") {
                 bounded_command(observation)
             } else {
                 bounded(observation)
@@ -997,6 +1013,43 @@ impl Tool<'_> {
                     },
                 );
                 Ok(result.to_owned())
+            }
+            "save_skill" => {
+                let text = |key: &str| call.arguments[key].as_str().unwrap_or_default();
+                let name = text("name");
+                let path = crate::skills::save_in(
+                    &crate::skills::directory()?,
+                    name,
+                    text("description"),
+                    text("usage"),
+                    text("code"),
+                )?;
+                send(
+                    self.events,
+                    AppEvent::SkillsLoaded(crate::skills::list().unwrap_or_default()),
+                );
+                Ok(format!(
+                    "Saved skill {name} ({}). Run it later with run_skill.",
+                    path.display()
+                ))
+            }
+            "run_skill" => {
+                if self.settings.workspace_root.is_empty() {
+                    return Err("Skills run in the workspace folder, and none is attached. Use ask_user to ask the user to attach one.".to_owned());
+                }
+                let name = call.arguments["name"].as_str().unwrap_or_default().trim();
+                let script = crate::skills::path_in(&crate::skills::directory()?, name)?;
+                let root = std::path::Path::new(&self.settings.workspace_root);
+                let mut args = vec![script.to_string_lossy().into_owned()];
+                args.extend(crate::skills::arguments(&call.arguments)?);
+                let result = tools::run_program(
+                    &self.settings.workspace_root,
+                    &crate::skills::python(root),
+                    &args,
+                    self.cancelled,
+                );
+                send(self.events, AppEvent::WorkspaceChanged);
+                result
             }
             name if crate::web::is_web_tool(name) => {
                 if !self.settings.web_access {
@@ -1784,6 +1837,77 @@ mod run_tests {
         }
         assert!(body.contains("Read notes.md"));
         assert!(body.contains("Every tool in this list works right now"));
+    }
+
+    #[test]
+    fn the_agent_saves_a_working_script_as_a_skill_and_reuses_it() {
+        let folder = std::env::temp_dir().join(format!("moxi-skill-run-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "a\nb\nc\n").unwrap();
+        let call = |id: usize, name: &str, arguments: Value| {
+            serde_json::json!({"content": null, "tool_calls": [{
+                "id": format!("call{id:05}"), "type": "function",
+                "function": {"name": name, "arguments": arguments.to_string()}
+            }]})
+        };
+        let code = "import sys\nprint(sum(1 for _ in open(sys.argv[1])), 'lines')\n";
+        let save = serde_json::json!({"name": "count_lines", "description": "Count lines in a file", "usage": "<file>", "code": code});
+        let (url, server) = mock_provider(vec![
+            // Saving before anything has run is refused.
+            call(1, "save_skill", save.clone()),
+            call(
+                2,
+                "run_command",
+                serde_json::json!({"command": "python3 -c \"print(len(open('notes.txt').readlines()))\""}),
+            ),
+            call(3, "save_skill", save),
+            call(
+                4,
+                "run_skill",
+                serde_json::json!({"name": "count_lines", "args": ["notes.txt"]}),
+            ),
+            serde_json::json!({"content": "notes.txt has 3 lines."}),
+        ]);
+        let store = Store::in_memory();
+        store.set_folder(folder.to_str().unwrap()).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let events = EventSender {
+            channel: sender,
+            wake: Box::new(|| {}),
+        };
+        let (_tx, commands) = std::sync::mpsc::channel();
+        run_agent(
+            &store,
+            &Runtime::new().unwrap(),
+            &events,
+            &commands,
+            &mut VecDeque::new(),
+            AgentRequest {
+                settings: Settings {
+                    lm_studio_url: url,
+                    selected_model: Some("mock".into()),
+                    workspace_root: store.folder().unwrap(),
+                    ..Settings::default()
+                },
+                content: "count lines".into(),
+                auto_approve: std::sync::Arc::new(AtomicBool::new(true)),
+                chat: false,
+            },
+            &AtomicBool::new(false),
+        );
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].contains("\"save_skill\"") && bodies[0].contains("\"run_skill\""));
+        assert!(bodies[1].contains("Save a skill only after you have run equivalent code"));
+        assert!(bodies[3].contains("Saved skill count_lines"));
+        assert!(bodies[4].contains("3 lines"), "{}", bodies[4]);
+        assert!(events.iter().any(|event| matches!(event,
+            AppEvent::SkillsLoaded(skills) if skills.iter().any(|skill| skill.name == "count_lines"))));
+        // Later runs see the saved skill in their context.
+        let note = crate::skills::context_note(&crate::skills::list().unwrap()).unwrap();
+        assert!(note.contains("- count_lines: Count lines in a file (usage: <file>)"));
+        let _ = std::fs::remove_dir_all(folder);
+        let _ = std::fs::remove_dir_all(crate::skills::directory().unwrap());
     }
 
     #[test]
