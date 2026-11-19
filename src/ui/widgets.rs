@@ -9,6 +9,7 @@ pub enum ProviderStatus {
     OnlineNoModel,
     Ready,
     Available,
+    Reconnecting,
 }
 
 pub use super::theme::{ACCENT, SURFACE, SURFACE_RAISED, TEXT, TEXT_MUTED};
@@ -318,12 +319,8 @@ pub fn reasoning_picker(ui: &mut egui::Ui, level: &mut u8) -> bool {
     let before = *level;
     let index = (*level).min(3) as usize;
     egui::ComboBox::from_id_salt("reasoning_level")
-        .selected_text(if index == 0 {
-            "Reasoning off".to_owned()
-        } else {
-            format!("Reasoning: {}", REASONING_LEVELS[index])
-        })
-        .width(130.0)
+        .selected_text(format!("Think: {}", REASONING_LEVELS[index]))
+        .width(104.0)
         .show_ui(ui, |ui| {
             for (value, label) in REASONING_LEVELS.iter().enumerate() {
                 ui.selectable_value(level, value as u8, *label);
@@ -397,6 +394,7 @@ pub fn status_badge(ui: &mut egui::Ui, status: ProviderStatus) {
         ProviderStatus::OnlineNoModel => (Color32::from_rgb(222, 185, 105), "Connected · no model"),
         ProviderStatus::Ready => (ACCENT, "Connected"),
         ProviderStatus::Available => (TEXT_MUTED, "Available"),
+        ProviderStatus::Reconnecting => (Color32::from_rgb(222, 185, 105), "Reconnecting…"),
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());

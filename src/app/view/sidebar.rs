@@ -106,6 +106,7 @@ impl MoxiBoxApp {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 // Entries arrive depth-first; skip descendants of collapsed folders.
                 let mut hidden_below = usize::MAX;
+                let mut rescan = false;
                 for entry in &self.workspace_entries {
                     if entry.depth > hidden_below {
                         continue;
@@ -118,8 +119,11 @@ impl MoxiBoxApp {
                         .is_some_and(|(path, _)| path == &entry.path);
                     let clicked = widgets::file_row(ui, entry, selected, expanded);
                     if entry.is_directory {
-                        if clicked && !self.expanded_folders.remove(&entry.path) {
-                            self.expanded_folders.insert(entry.path.clone());
+                        if clicked {
+                            if !self.expanded_folders.remove(&entry.path) {
+                                self.expanded_folders.insert(entry.path.clone());
+                            }
+                            rescan = true;
                         }
                         if !self.expanded_folders.contains(&entry.path) {
                             hidden_below = entry.depth;
@@ -131,6 +135,10 @@ impl MoxiBoxApp {
                             path: entry.path.clone(),
                         });
                     }
+                }
+                // Opening a folder lists its contents right away instead of on the next tick.
+                if rescan {
+                    self.rescan_tree_now();
                 }
                 if self.workspace_entries.is_empty() {
                     ui.label(RichText::new("Empty folder").small().color(TEXT_MUTED));

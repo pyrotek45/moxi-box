@@ -56,7 +56,7 @@ pub fn start(
                     Ok(content) => AppEvent::PreviewLoaded { path, content },
                     Err(error) => AppEvent::Notice(error),
                 },
-                AppCommand::BrowseWorkspace { root } => browse(root),
+                AppCommand::BrowseWorkspace { root, expanded } => browse(root, &expanded),
                 command => {
                     if backend_sender.send(command).is_err() {
                         break;
@@ -234,7 +234,7 @@ fn handle(
                 sync_conversation(store, events);
             }
         }
-        AppCommand::BrowseWorkspace { root } => send(events, browse(root)),
+        AppCommand::BrowseWorkspace { root, expanded } => send(events, browse(root, &expanded)),
         AppCommand::ReadPreview { root, path } => match tools::preview(&root, &path) {
             Ok(content) => send(events, AppEvent::PreviewLoaded { path, content }),
             Err(error) => fail(events, error),
@@ -280,8 +280,8 @@ fn handle(
 }
 
 /// Periodic and quiet: a folder that vanished shows as empty rather than spamming notices.
-fn browse(root: String) -> AppEvent {
-    let entries = tools::workspace_entries(&root).unwrap_or_default();
+fn browse(root: String, expanded: &[String]) -> AppEvent {
+    let entries = tools::tree_entries(&root, expanded).unwrap_or_default();
     AppEvent::WorkspaceLoaded { root, entries }
 }
 
