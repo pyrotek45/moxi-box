@@ -630,3 +630,25 @@ fn sending_without_a_connection_shows_a_clear_warning_and_keeps_the_message() {
         Ok(AppCommand::SendChat { .. })
     ));
 }
+
+#[test]
+fn copy_buttons_copy_the_message_without_moxi_notices() {
+    use crate::domain::{ChatMessage, MessageRole};
+    let message = |role, content: &str| ChatMessage {
+        id: 1,
+        role,
+        content: content.into(),
+    };
+    let reply = format!(
+        "Here is the fix.\n\n{}\n\n[Run interrupted: Stopped by user.]",
+        crate::provider::lm_studio::harness_note("Recovery mode 1/3: skipped.")
+    );
+    assert_eq!(
+        crate::ui::widgets::copy_text(&message(MessageRole::Assistant, &reply)),
+        "Here is the fix."
+    );
+    assert_eq!(
+        crate::ui::widgets::copy_text(&message(MessageRole::User, "  fix main.py \n")),
+        "fix main.py"
+    );
+}

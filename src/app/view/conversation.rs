@@ -98,11 +98,12 @@ impl MoxiBoxApp {
                                 let steps = self.activity.iter().filter(|step| step.message_id == message.id).collect::<Vec<_>>();
                                 if steps.is_empty() && streaming && message.content.is_empty() {
                                     let label = self.waiting_label("Thinking");
-                                    widgets::bubble(ui, message.id, message.role, |ui| widgets::working_indicator(ui, &label));
+                                    widgets::bubble(ui, message.id, message.role, "", |ui| widgets::working_indicator(ui, &label));
                                 } else if steps.is_empty() {
                                     widgets::message_bubble(ui, message, streaming);
                                 } else {
-                                    widgets::bubble(ui, message.id, message.role, |ui| {
+                                    let copy = if streaming { String::new() } else { widgets::copy_text(message) };
+                                    widgets::bubble(ui, message.id, message.role, &copy, |ui| {
                                         // Text and tool steps in the order they happened.
                                         let content = &message.content;
                                         let mut start = 0;
