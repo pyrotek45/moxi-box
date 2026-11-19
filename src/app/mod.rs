@@ -68,6 +68,8 @@ pub struct MoxiBoxApp {
     approval_forced: bool,
     /// Why the last Send could not go out; shown as a warning above the composer.
     send_blocked: Option<SendBlocked>,
+    /// Connect was pressed in the composer; send its message once connected.
+    send_after_connect: bool,
     /// (request id, question, options) of an ask_user call waiting for the user.
     question: Option<(String, String, Vec<String>)>,
     /// The composer text looks like a coding task while in Chat mode.
@@ -87,6 +89,11 @@ pub struct MoxiBoxApp {
     /// The workspace's long-running goal (/goal).
     goal: String,
     goal_draft: Option<String>,
+    /// Saved Python skills, shared by every workspace.
+    skills: Vec<crate::domain::Skill>,
+    show_skills: bool,
+    /// A skill whose Delete was clicked once and waits for confirmation.
+    skill_to_delete: Option<String>,
     /// Lessons shared by every workspace.
     playbook: String,
     /// Edited alongside memory_draft while the memory dialog is open.
@@ -153,6 +160,7 @@ impl MoxiBoxApp {
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
             send_blocked: None,
+            send_after_connect: false,
             question: None,
             mode_hint: false,
             chat_confirmed: false,
@@ -167,6 +175,9 @@ impl MoxiBoxApp {
             memory_draft: None,
             goal: String::new(),
             goal_draft: None,
+            skills: Vec::new(),
+            show_skills: false,
+            skill_to_delete: None,
             playbook: String::new(),
             playbook_draft: String::new(),
             memory_tab: 0,
@@ -242,6 +253,7 @@ impl MoxiBoxApp {
                     self.memory = memory;
                     self.playbook = playbook;
                 }
+                AppEvent::SkillsLoaded(skills) => self.skills = skills,
                 AppEvent::SettingsImported(settings) => {
                     self.settings = settings;
                     self.refresh_models(false);
@@ -556,8 +568,39 @@ impl MoxiBoxApp {
         self.show_settings
             || self.memory_draft.is_some()
             || self.goal_draft.is_some()
+            || self.show_skills
             || self.provider_draft.is_some()
             || self.workspace_dialog.is_some()
+    }
+
+    /// The memory included in every request, for the composer footer: "Memory: 3 here · 2
+    /// shared · 1 skill", or empty when there is none.
+    fn context_summary(&self) -> String {
+        let count = |text: &str| {
+            text.lines()
+                .map(|line| line.trim().trim_start_matches(['-', '*']).trim())
+                .filter(|line| !line.is_empty())
+                .count()
+        };
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut parts = Vec::new();
+        let here = count(&self.memory);
+        if here > 0 {
+            parts.push(format!("{here} here"));
+        }
+        let shared = count(&self.playbook);
+        if shared > 0 {
+            parts.push(format!("{shared} shared"));
+        }
+        if !self.skills.is_empty() {
+            parts.push(plural(self.skills.len(), "skill", "skills"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("Memory: {}", parts.join(" · "))
+        }
     }
 
     fn open_memory(&mut self) {

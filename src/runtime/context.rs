@@ -76,6 +76,7 @@ pub(super) fn prepare(
         &summary,
         &workspace,
     );
+    history.extend(skills_note());
     history.extend(tool_record.map(|content| ChatMessage {
         id: 0,
         role: MessageRole::System,
@@ -101,6 +102,7 @@ pub(super) fn current_system(
         &summary,
         &workspace_context(&settings.workspace_root),
     );
+    notes.extend(skills_note());
     notes.extend(
         tools_used_note(&state.messages, &state.activity, through).map(|content| ChatMessage {
             id: 0,
@@ -112,6 +114,17 @@ pub(super) fn current_system(
         .as_str()
         .unwrap_or(prompt)
         .to_owned())
+}
+
+/// The saved skills, as a system note.
+fn skills_note() -> Option<ChatMessage> {
+    crate::skills::context_note(&crate::skills::list().unwrap_or_default()).map(|content| {
+        ChatMessage {
+            id: 0,
+            role: MessageRole::System,
+            content,
+        }
+    })
 }
 
 /// A record of the tools earlier replies ran, so later turns know which files were read or

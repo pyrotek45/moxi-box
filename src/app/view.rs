@@ -17,6 +17,7 @@ impl MoxiBoxApp {
         self.poll_folder_picker();
         self.poll_file_dialog();
         self.tick_connection(context);
+        self.finish_connect_and_send();
         self.refresh_tree(context);
         // Worker events wake egui directly; idle windows do not need polling redraws. During a
         // run, redraw every frame so stick-to-bottom scrolling settles at once instead of

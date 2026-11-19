@@ -2,6 +2,7 @@ mod app;
 mod domain;
 mod provider;
 mod runtime;
+mod skills;
 mod storage;
 mod tools;
 mod ui;

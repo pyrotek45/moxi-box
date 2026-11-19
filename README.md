@@ -26,6 +26,7 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
 | `run_command` | Runs one shell command from the workspace root, including builds, tests, Git, and `python3` scripts. | Required |
 | `ask_user` | Asks you a multiple-choice question (2–6 options) when the agent needs a decision or missing information, or for quizzes and polls; the run waits. If a model writes lettered choices as text instead, Moxi has it ask them again with this tool. Click an option or type your own answer. Also available in Chat mode. | None (you answer) |
+| `save_skill` / `run_skill` | Save a Python script that already ran successfully in this run as a reusable **skill**, and run saved skills with arguments from the workspace folder (using the project's `.venv` Python when present). Agent mode with a folder. | Required |
 | `remember` | Appends a concise fact to workspace memory, or with `scope: "all"` a lesson to the shared playbook used by every workspace. | Required |
 | `web_search` | Searches the web (DuckDuckGo, falling back to DuckDuckGo Lite and Bing when one answers with a bot check) and returns titles, URLs, and snippets. If every engine is blocked it says so instead of reporting "no results". Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
@@ -40,7 +41,7 @@ File tools reject traversal and symlink escapes. Paths normally look like `essay
 
 A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace and asks for a name (leave it blank to name it from your first message); double-click a workspace or click the title above the chat to rename it; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
 
-Pressing Send while no model is connected (or while reconnecting, or with no model selected) shows a red warning above the composer with **Connect** / **Retry now** and **Provider settings**; your message stays in the box.
+While no model is connected the Send button reads **Connect**: pressing it connects and then sends your message (slash commands still send offline). Pressing Send while no model is connected (or while reconnecting, or with no model selected) shows a red warning above the composer with **Connect** / **Retry now** and **Provider settings**; your message stays in the box.
 
 In Chat mode, a message that looks like a coding task (for example one naming a file or asking to fix or build something) shows a suggestion to switch to Agent mode before it is sent.
 
@@ -52,7 +53,9 @@ Every message is sent with the workspace's earlier messages, a bounded file/fold
 
 Context recovery has two modes in provider settings. **Auto** sends the full available history until the provider explicitly reports that context is too large, then summarizes older turns, records a conservative working limit for that workspace, and retries. **Manual** uses the token budget you set and compacts proactively before requests cross a conservative estimate, which can be steadier for models that report context limits inconsistently. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
-**Memory** (sidebar) holds editable notes for the current workspace and a **shared playbook** for all workspaces. The agent can propose a `remember` note for approval, for example a lesson about how it solved a problem, so later runs improve; you can add, remove, or edit notes yourself, and choose which notes are used everywhere: **Share** moves a workspace note to the playbook, **Unshare** moves it back. A `remember` call with `scope: "all"` is labelled as shared in its approval prompt. Do not store secrets. **Goal** holds a long-running objective that is added to every request.
+**Memory** (sidebar) holds editable notes for the current workspace and a **shared playbook** for all workspaces. The agent can propose a `remember` note for approval, for example a lesson about how it solved a problem, so later runs improve; you can add, remove, or edit notes yourself, and choose which notes are used everywhere: **Share** moves a workspace note to the playbook, **Unshare** moves it back. A `remember` call with `scope: "all"` is labelled as shared in its approval prompt. Do not store secrets. **Goal** holds a long-running objective that is added to every request. The composer footer shows what memory is active on every message (for example "Memory: 3 here · 2 shared · 2 skills"); click it to open Memory.
+
+**Skills** are Python scripts the agent saved after they worked, shared by every workspace and stored as plain files in the `skills` folder beside Moxi's database. The agent sees each skill's name and one-line description and can run it with `run_skill`; it may save one only after running equivalent code successfully in the same run, and the script is syntax-checked first. Saving and running always ask for approval. Open **Skills** in the sidebar to read their code or delete them; settings export and import include them.
 
 ### Commands
 

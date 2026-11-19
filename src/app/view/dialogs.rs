@@ -5,6 +5,7 @@ mod goal;
 mod memory;
 mod provider;
 mod settings;
+mod skills;
 mod workspace;
 
 impl MoxiBoxApp {
@@ -15,6 +16,7 @@ impl MoxiBoxApp {
         self.workspace_dialog(context, width, height);
         self.memory_dialog(context, width, height);
         self.goal_dialog(context, width);
+        self.skills_dialog(context, width, height);
         self.settings_dialog(context, width, height);
     }
 }

@@ -150,16 +150,30 @@ impl MoxiBoxApp {
     fn shortcuts_section(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 2.0;
         let notes = memory_notes(&self.memory).len();
-        let detail = match notes {
-            0 => "empty".to_owned(),
-            1 => "1 note".to_owned(),
-            n => format!("{n} notes"),
+        let shared = memory_notes(&self.playbook).len();
+        let detail = match (notes, shared) {
+            (0, 0) => "empty".to_owned(),
+            (1, 0) => "1 note".to_owned(),
+            (n, 0) => format!("{n} notes"),
+            (n, s) => format!("{n} + {s} shared"),
         };
         if widgets::nav_row(ui, "Memory", &detail)
-            .on_hover_text("Facts and lessons the agent keeps for this workspace")
+            .on_hover_text("Notes for this workspace, plus shared notes used in every workspace")
             .clicked()
         {
             self.open_memory();
+        }
+        let skills = match self.skills.len() {
+            0 => "none yet".to_owned(),
+            1 => "1 saved".to_owned(),
+            n => format!("{n} saved"),
+        };
+        if widgets::nav_row(ui, "Skills", &skills)
+            .on_hover_text("Python scripts the agent saved to reuse in any workspace")
+            .clicked()
+        {
+            self.show_skills = true;
+            self.skill_to_delete = None;
         }
         let goal = if self.goal.is_empty() {
             "not set"

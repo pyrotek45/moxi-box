@@ -116,8 +116,35 @@ pub const LEGACY_TOOLS: [&str; 1] = ["replace_all"];
 pub fn requires_approval(name: &str) -> bool {
     matches!(
         name,
-        "delete_path" | "write_file" | "replace_all" | "edit_file" | "run_command" | "remember"
+        "delete_path"
+            | "write_file"
+            | "replace_all"
+            | "edit_file"
+            | "run_command"
+            | "remember"
+            | "save_skill"
+            | "run_skill"
     )
+}
+
+/// "name arg1 arg2" for labels and previews of a run_skill call.
+fn skill_command(arguments: &Value) -> String {
+    let mut parts = vec![arguments["name"].as_str().unwrap_or("").to_owned()];
+    parts.extend(crate::skills::arguments(arguments).unwrap_or_default());
+    parts.join(" ")
+}
+
+/// Run a program with plain string arguments from the workspace folder, with the same output
+/// bounds and Stop support as run_command.
+pub fn run_program(
+    root: &str,
+    program: &Path,
+    args: &[String],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    let root = canonical_root(root)?;
+    let args = args.iter().map(|arg| json!(arg)).collect::<Vec<_>>();
+    run_command(&root, &program.to_string_lossy(), Some(&args), cancelled)
 }
 
 /// A short, readable name for a call: "Edit src/a.rs" while pending, "Edited src/a.rs" when done.
@@ -149,6 +176,16 @@ pub fn label(name: &str, arguments: &Value, done: bool) -> String {
         "list_tasks" => verb("Check the task list", "Checked the task list"),
         "update_tasks" => verb("Update the task list", "Updated the task list"),
         "remember" => verb("Save a project note", "Saved a project note"),
+        "save_skill" => format!(
+            "{} {}",
+            verb("Save skill", "Saved skill"),
+            arguments["name"].as_str().unwrap_or("")
+        ),
+        "run_skill" => format!(
+            "{} {}",
+            verb("Run skill", "Ran skill"),
+            skill_command(arguments)
+        ),
         "web_search" => format!(
             "{} \"{}\"",
             verb("Search the web for", "Searched the web for"),
@@ -183,6 +220,13 @@ pub fn call_preview(name: &str, arguments: &Value) -> String {
             format!("Shared playbook (all workspaces): {}", text("note"))
         }
         "remember" => text("note").to_owned(),
+        "save_skill" => format!(
+            "# {}\n# {}\n{}",
+            text("name"),
+            text("description"),
+            text("code")
+        ),
+        "run_skill" => format!("$ skill {}", skill_command(arguments)),
         _ => String::new(),
     }
 }
@@ -210,7 +254,8 @@ pub fn result_detail(name: &str, arguments: &Value, result: &str) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        "run_command" => format!("{preview}\n{result}"),
+        "run_command" | "run_skill" => format!("{preview}\n{result}"),
+        "save_skill" => result.to_owned(),
         _ if preview.is_empty() => result.to_owned(),
         _ => format!("{result}\n\n{preview}"),
     }
@@ -341,6 +386,14 @@ pub fn approval_summary(name: &str, arguments: &Value) -> String {
             arguments["path"].as_str().unwrap_or("a workspace file")
         ),
         "run_command" => "Run this command in the workspace?".to_owned(),
+        "save_skill" => format!(
+            "Save the skill {} for later runs in any workspace? Review the code below.",
+            arguments["name"].as_str().unwrap_or("")
+        ),
+        "run_skill" => format!(
+            "Run the skill {} in the workspace? It is a saved Python script that runs with your permissions.",
+            arguments["name"].as_str().unwrap_or("")
+        ),
         _ => format!("Use {name}?"),
     }
 }

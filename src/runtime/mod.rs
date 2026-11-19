@@ -200,6 +200,15 @@ fn handle(
             }
             Err(error) => fail(events, error),
         },
+        AppCommand::DeleteSkill(name) => {
+            if let Err(error) = crate::skills::delete(&name) {
+                fail(events, error);
+            }
+            send(
+                events,
+                AppEvent::SkillsLoaded(crate::skills::list().unwrap_or_default()),
+            );
+        }
         AppCommand::SetGoal(goal) => sync_after(store, events, store.save_goal(&goal)),
         AppCommand::ResetWorkspace { path } => {
             let result = tools::reset_workspace(&path).and_then(|backup| {
@@ -397,6 +406,10 @@ fn sync_after(store: &Store, events: &EventSender, result: Result<(), String>) {
 }
 
 fn sync_conversation(store: &Store, events: &EventSender) {
+    match crate::skills::list() {
+        Ok(skills) => send(events, AppEvent::SkillsLoaded(skills)),
+        Err(error) => fail(events, error),
+    }
     match store.tasks() {
         Ok(tasks) => send(events, AppEvent::TasksUpdated(tasks)),
         Err(error) => fail(events, error),

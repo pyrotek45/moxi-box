@@ -181,6 +181,15 @@ impl Store {
             "moxi_box_settings": 1,
             "settings": settings,
             "playbook": self.playbook()?,
+            "skills": crate::skills::list()?
+                .into_iter()
+                .map(|skill| serde_json::json!({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "usage": skill.usage,
+                    "code": skill.code,
+                }))
+                .collect::<Vec<_>>(),
         });
         let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
         fs::write(path, text)
@@ -202,9 +211,39 @@ impl Store {
         if playbook.len() > 6000 {
             return Err("The playbook in this file is over 6,000 bytes.".to_owned());
         }
+        let skills = document["skills"].as_array().cloned().unwrap_or_default();
+        let text = |skill: &serde_json::Value, key: &str| {
+            skill[key].as_str().unwrap_or_default().to_owned()
+        };
+        // Check every skill before changing anything; syntax is checked again when saved.
+        for skill in &skills {
+            crate::skills::check_name(&text(skill, "name"))?;
+            if text(skill, "code").trim().is_empty() {
+                return Err(format!(
+                    "Skill {} in this file has no code.",
+                    text(skill, "name")
+                ));
+            }
+        }
         settings.workspace_root = self.settings()?.workspace_root;
         self.save_settings(&settings)?;
         self.save_playbook(playbook)?;
+        let directory = crate::skills::directory()?;
+        for skill in &skills {
+            crate::skills::save_in(
+                &directory,
+                &text(skill, "name"),
+                &text(skill, "description"),
+                &text(skill, "usage"),
+                &text(skill, "code"),
+            )
+            .map_err(|error| {
+                format!(
+                    "Settings imported, but skill {} was not: {error}",
+                    text(skill, "name")
+                )
+            })?;
+        }
         Ok(settings)
     }
 
@@ -353,7 +392,7 @@ pub fn log_crash(report: &str) {
     }
 }
 
-fn data_directory() -> Result<PathBuf, String> {
+pub(crate) fn data_directory() -> Result<PathBuf, String> {
     if let Ok(directory) = std::env::var("XDG_DATA_HOME") {
         return Ok(PathBuf::from(directory).join(DATABASE_DIRECTORY));
     }
@@ -395,7 +434,10 @@ mod tests {
         };
         store.save_settings(&settings).unwrap();
         store.save_playbook("- Lesson: use .venv").unwrap();
+        let skills = crate::skills::directory().unwrap();
+        crate::skills::save_in(&skills, "hello", "Say hello", "", "print('hello')").unwrap();
         store.export_settings(&path).unwrap();
+        crate::skills::delete("hello").unwrap();
         assert!(!fs::read_to_string(&path)
             .unwrap()
             .contains("/private/project"));
@@ -411,6 +453,10 @@ mod tests {
         assert!(imported.web_access);
         assert_eq!(imported.workspace_root, "/kept");
         assert_eq!(other.playbook().unwrap(), "- Lesson: use .venv");
+        let restored = crate::skills::list().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].description, "Say hello");
+        let _ = fs::remove_dir_all(skills);
         fs::write(&path, "{\"settings\":{}}").unwrap();
         assert!(other.import_settings(&path).is_err());
         assert_eq!(other.playbook().unwrap(), "- Lesson: use .venv");

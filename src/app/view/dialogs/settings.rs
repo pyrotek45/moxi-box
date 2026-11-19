@@ -182,7 +182,7 @@ impl MoxiBoxApp {
             .clicked();
         ui.add_space(12.0);
         heading(ui, "Backup");
-        hint(ui, "Export or import preferences and the shared playbook as a JSON file. Folders, chats, and workspace memory are not included.");
+        hint(ui, "Export or import preferences, the shared playbook, and skills as a JSON file. Folders, chats, and workspace memory are not included.");
         ui.add_enabled_ui(self.file_dialog.is_none(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui
@@ -231,6 +231,10 @@ fn help_settings(ui: &mut egui::Ui) {
         (
             "list_tasks · update_tasks",
             "Plan and track work in the sidebar task list. Automatic.",
+        ),
+        (
+            "save_skill · run_skill",
+            "Save a working Python script as a reusable skill, and run saved skills. Needs approval.",
         ),
         (
             "ask_user",
