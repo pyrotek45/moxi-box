@@ -174,6 +174,11 @@ pub(super) fn run_agent(
         if let Err(error) = reply.save(store) {
             return fail_run(store, events, error);
         }
+        if response.from_text {
+            // The call text was streamed raw; show only the prose around it.
+            reply.withdraw_turn(store, events);
+            let _ = reply.push(store, events, &response.content);
+        }
         if response.tool_calls.is_empty() {
             messages.push(serde_json::json!({"role":"assistant","content":response.content}));
         } else {
@@ -1661,6 +1666,71 @@ mod run_tests {
             .unwrap();
         assert!(tools_line.contains("ask_user") && !tools_line.contains("run_command"));
         assert!(system.contains("No folder is attached to this workspace right now"));
+    }
+
+    #[test]
+    fn text_tool_calls_run_and_attaching_a_folder_later_enables_file_tools() {
+        let folder = std::env::temp_dir().join(format!("moxi-later-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "hello from the folder").unwrap();
+        let store = Store::in_memory();
+        // First message: no folder, so file tools are not offered.
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "Attach a folder first."}),
+        ]);
+        run(&store, url, false);
+        let first = server.join().unwrap();
+        assert!(!first[0].contains("\"read_file\""));
+
+        // The user attaches a folder; the next message offers file tools and says so.
+        store.set_folder(folder.to_str().unwrap()).unwrap();
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "Reading it now.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}\n</tool_call>"}),
+            serde_json::json!({"content": "It says hello."}),
+        ]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let events = EventSender {
+            channel: sender,
+            wake: Box::new(|| {}),
+        };
+        let (_tx, commands) = std::sync::mpsc::channel();
+        run_agent(
+            &store,
+            &Runtime::new().unwrap(),
+            &events,
+            &commands,
+            &mut VecDeque::new(),
+            AgentRequest {
+                settings: Settings {
+                    lm_studio_url: url,
+                    selected_model: Some("mock".into()),
+                    workspace_root: store.folder().unwrap(),
+                    ..Settings::default()
+                },
+                content: "read notes.txt".into(),
+                auto_approve: Default::default(),
+                chat: false,
+            },
+            &AtomicBool::new(false),
+        );
+        drop(receiver);
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].contains("\"read_file\""));
+        assert!(bodies[0].contains("A folder is attached right now"));
+        assert!(bodies[0].contains("are out of date"));
+        // The call written as text was executed and its result returned to the model.
+        assert!(bodies[1].contains("hello from the folder"), "{}", bodies[1]);
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(!reply.contains("<tool_call>"), "{reply}");
+        assert!(reply.starts_with("Reading it now.") && reply.ends_with("It says hello."));
+        let _ = std::fs::remove_dir_all(folder);
     }
 
     #[test]

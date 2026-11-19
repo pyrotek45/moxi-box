@@ -111,6 +111,9 @@ pub fn is_context_limit(error: &str) -> bool {
 pub struct AgentResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    /// The calls were written as text in the reply (see text_tool_calls), which was streamed
+    /// to the user as-is; `content` is the reply with that text removed.
+    pub from_text: bool,
 }
 #[derive(Debug)]
 pub struct ToolCall {
@@ -407,14 +410,121 @@ fn parse_agent_response(payload: &Value) -> Result<AgentResponse, String> {
             arguments,
         });
     }
-    let content = message["content"].as_str().unwrap_or_default().to_owned();
+    let mut content = message["content"].as_str().unwrap_or_default().to_owned();
+    let mut from_text = false;
+    if tool_calls.is_empty() {
+        if let Some((rest, calls)) = text_tool_calls(&content) {
+            from_text = true;
+            content = rest;
+            for (name, arguments) in calls {
+                tool_calls.push(ToolCall {
+                    id: format!(
+                        "mx{:07}",
+                        NEXT_ID.fetch_add(1, Ordering::Relaxed) % 10_000_000
+                    ),
+                    name,
+                    arguments,
+                });
+            }
+        }
+    }
     if content.trim().is_empty() && tool_calls.is_empty() {
         return Err("Provider returned an empty assistant turn.".to_owned());
     }
     Ok(AgentResponse {
         content,
         tool_calls,
+        from_text,
     })
+}
+
+/// Tool calls a model wrote into its reply text instead of the structured field. Many local
+/// chat templates leave them there, e.g. `<tool_call>{"name":..,"arguments":..}</tool_call>`
+/// (Qwen/Hermes), `[TOOL_CALLS][...]` (Mistral), `<function=name>{..}</function>` (Llama), or
+/// a reply that is only such a JSON object. Only complete, valid JSON is accepted: a cut-off
+/// call is left as text and never repaired into something executable.
+/// Returns the remaining text and the (name, arguments) calls.
+fn text_tool_calls(content: &str) -> Option<(String, Vec<(String, Value)>)> {
+    fn call(value: &Value) -> Option<(String, Value)> {
+        let function = if value["function"].is_object() {
+            &value["function"]
+        } else {
+            value
+        };
+        let name = function["name"].as_str()?.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        let arguments = match function
+            .get("arguments")
+            .or_else(|| function.get("parameters"))
+        {
+            None | Some(Value::Null) => json!({}),
+            Some(Value::String(raw)) => serde_json::from_str(raw).ok()?,
+            Some(value) => value.clone(),
+        };
+        arguments.is_object().then(|| (name.to_owned(), arguments))
+    }
+    fn calls(value: &Value) -> Option<Vec<(String, Value)>> {
+        match value {
+            Value::Array(items) if !items.is_empty() => items.iter().map(call).collect(),
+            value => call(value).map(|call| vec![call]),
+        }
+    }
+    let mut found = Vec::new();
+    let mut rest = String::new();
+    let mut text = content;
+    // Tagged forms: <tool_call>JSON</tool_call> and <function=name>JSON</function>.
+    loop {
+        let tagged = text
+            .find("<tool_call>")
+            .map(|i| (i, "<tool_call>", "</tool_call>"));
+        let function = text
+            .find("<function=")
+            .map(|i| (i, "<function=", "</function>"));
+        let Some((start, open, close)) = [tagged, function]
+            .into_iter()
+            .flatten()
+            .min_by_key(|(start, _, _)| *start)
+        else {
+            break;
+        };
+        let after = &text[start + open.len()..];
+        let end = after.find(close)?;
+        let inner = &after[..end];
+        if open == "<function=" {
+            let (name, body) = inner.split_once('>')?;
+            let arguments: Value = serde_json::from_str(body.trim()).ok()?;
+            found.push(call(&json!({"name": name.trim(), "arguments": arguments}))?);
+        } else {
+            found.extend(calls(&serde_json::from_str(inner.trim()).ok()?)?);
+        }
+        rest.push_str(&text[..start]);
+        text = &after[end + close.len()..];
+    }
+    rest.push_str(text);
+    if found.is_empty() {
+        let trimmed = content.trim();
+        if let Some((before, after)) = trimmed.split_once("[TOOL_CALLS]") {
+            found = calls(&serde_json::from_str(after.trim()).ok()?)?;
+            rest = before.to_owned();
+        } else {
+            // A reply that is nothing but a call object, optionally in a ```json fence.
+            let body = trimmed
+                .strip_prefix("```json")
+                .or_else(|| trimmed.strip_prefix("```"))
+                .and_then(|body| body.strip_suffix("```"))
+                .unwrap_or(trimmed)
+                .trim();
+            let value: Value = serde_json::from_str(body).ok()?;
+            if value.get("name").is_none() && value.get("function").is_none() && !value.is_array() {
+                return None;
+            }
+            found = calls(&value)?;
+            rest = String::new();
+        }
+    }
+    (!found.is_empty()).then(|| (rest.trim().to_owned(), found))
 }
 
 async fn summarize_inner(
@@ -577,6 +687,7 @@ mod tests {
         ];
         let mut messages = provider_messages(AGENT_PROMPT, &history);
         let response = AgentResponse {
+            from_text: false,
             content: String::new(),
             tool_calls: vec![ToolCall {
                 id: "call-123".into(),
@@ -685,6 +796,39 @@ mod tests {
         assert_eq!(response.tool_calls[0].arguments["path"], "a.rs");
         assert_eq!(response.tool_calls[1].name, "list_files");
         assert_eq!(response.tool_calls[1].id.len(), 9);
+    }
+
+    #[test]
+    fn tool_calls_written_as_text_are_recognized() {
+        let reply = |content: &str| {
+            parse_agent_response(&json!({"choices":[{"message":{"content":content}}]})).unwrap()
+        };
+        let qwen = reply("Let me check.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.py\"}}\n</tool_call>");
+        assert!(qwen.from_text);
+        assert_eq!(qwen.content, "Let me check.");
+        assert_eq!(qwen.tool_calls[0].name, "read_file");
+        assert_eq!(qwen.tool_calls[0].arguments["path"], "a.py");
+        assert_eq!(qwen.tool_calls[0].id.len(), 9);
+        let two = reply("<tool_call>{\"name\":\"list_files\",\"arguments\":{}}</tool_call><tool_call>{\"name\":\"list_tasks\"}</tool_call>");
+        assert_eq!(two.tool_calls.len(), 2);
+        let mistral =
+            reply("[TOOL_CALLS][{\"name\":\"run_command\",\"arguments\":{\"command\":\"ls\"}}]");
+        assert_eq!(mistral.tool_calls[0].arguments["command"], "ls");
+        let llama = reply("<function=glob>{\"pattern\": \"**/*.py\"}</function>");
+        assert_eq!(llama.tool_calls[0].name, "glob");
+        let bare =
+            reply("```json\n{\"name\": \"list_files\", \"parameters\": {\"path\": \"src\"}}\n```");
+        assert_eq!(bare.tool_calls[0].arguments["path"], "src");
+        assert!(bare.content.is_empty());
+        let openai = reply("{\"function\": {\"name\": \"list_tasks\", \"arguments\": \"{}\"}}");
+        assert_eq!(openai.tool_calls[0].name, "list_tasks");
+        // Cut-off or malformed calls stay text and are never executed.
+        let cut = reply("<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\": \"a\"");
+        assert!(cut.tool_calls.is_empty() && !cut.from_text);
+        assert!(reply("<tool_call>{oops}</tool_call>").tool_calls.is_empty());
+        // Ordinary prose and JSON that is not a call are left alone.
+        assert!(reply("Use {\"a\": 1} in config.").tool_calls.is_empty());
+        assert!(reply("{\"a\": 1}").tool_calls.is_empty());
     }
 
     #[test]
