@@ -4,12 +4,14 @@ use lm_studio::ToolCall;
 
 const MAX_OBSERVATION_BYTES: usize = 4000;
 /// Tools offered in Chat mode, besides web tools when Web access is on.
-const CHAT_TOOLS: [&str; 3] = ["list_tasks", "update_tasks", "ask_user"];
+const CHAT_TOOLS: [&str; 4] = ["list_tasks", "update_tasks", "ask_user", "remember"];
 /// Identical consecutive tool rounds before the model is warned, and before recovery mode.
 const REPEAT_WARNING: usize = 3;
 const REPEAT_RECOVERY: usize = 5;
 /// Recovery attempts per run before a still-repeating agent is stopped.
 const MAX_RECOVERIES: usize = 3;
+/// The same tool error this many times in a row (even with different arguments) starts recovery.
+const FAILURE_RECOVERY: usize = 3;
 
 pub(super) fn run_agent(
     store: &Store,
@@ -44,11 +46,17 @@ pub(super) fn run_agent(
         lm_studio::agent_prompt(settings.web_access)
     };
     let mut definitions = tools::definitions();
-    if chat {
+    // Without a folder, file tools and commands can only fail; do not offer them at all.
+    if chat || settings.workspace_root.is_empty() {
         definitions.retain(|definition| {
             CHAT_TOOLS.contains(&definition["function"]["name"].as_str().unwrap_or_default())
         });
     }
+    let prompt = if !chat && settings.workspace_root.is_empty() {
+        format!("{prompt}\n\nNo folder is attached to this workspace, so you cannot read or change files or run commands right now. If the request needs files, use ask_user to ask the user to attach a folder (the folder icon beside + in the sidebar), and meanwhile help with what you can: planning, tasks, explanations, and code shown in your reply.")
+    } else {
+        prompt
+    };
     if settings.web_access {
         definitions.extend(crate::web::definitions());
     }
@@ -62,6 +70,8 @@ pub(super) fn run_agent(
     let mut repeats = Repeats::default();
     let mut recoveries = 0;
     let mut status_corrections = 0;
+    let mut asked_for_tool = false;
+    let mut failures = FailureStreak::default();
     if let Err(error) = reason(
         store,
         runtime,
@@ -187,7 +197,13 @@ pub(super) fn run_agent(
                     lm_studio::append_tool_result(
                         &mut messages,
                         call,
-                        &format!("NOT RUN. Harness recovery mode: you have made this exact call ({names}) with identical arguments {repeated} times in a row, and repeating it cannot give a different result. Stop and diagnose: 1) restate what you are trying to achieve and what the earlier results told you; 2) check the task list and the last error; 3) choose a different action, such as reading the relevant file, running a test to see the real error, changing the arguments, using another tool, or searching the web if it is on; 4) if the work is already done, mark tasks completed and summarize; if you are truly blocked, explain the blocker to the user. Recovery attempt {recoveries} of {MAX_RECOVERIES}."),
+                        &format!(
+                            "NOT RUN. {}",
+                            recovery_guidance(
+                                &format!("you made the same call ({names}) with identical arguments {repeated} times in a row"),
+                                recoveries,
+                            )
+                        ),
                     );
                 }
                 continue;
@@ -209,11 +225,15 @@ pub(super) fn run_agent(
                     cancelled,
                 };
                 // Checked before approval so Chat mode never prompts for a tool it cannot run.
-                let chat_blocked = chat
-                    && !CHAT_TOOLS.contains(&call.name.as_str())
-                    && !crate::web::is_web_tool(&call.name);
-                let outcome = if chat_blocked {
+                // Checked before approval: a tool that was not offered is never run or prompted for.
+                let offered = definitions
+                    .iter()
+                    .any(|definition| definition["function"]["name"] == call.name.as_str())
+                    || tools::LEGACY_TOOLS.contains(&call.name.as_str());
+                let outcome = if !offered && chat {
                     tool.reject(call, &format!("{} is not available in Chat mode. Ask the user to switch to Agent mode for file access and commands.", call.name))
+                } else if !offered && settings.workspace_root.is_empty() {
+                    tool.reject(call, &format!("{} is not available: no folder is attached to this workspace, and retrying will not help. Use ask_user to ask the user to attach a folder, or continue without files.", call.name))
                 } else if blocked_memory {
                     tool.reject(
                         call,
@@ -228,6 +248,29 @@ pub(super) fn run_agent(
                         // already visible to the model, and re-prompting about it confuses it.
                         if !blocked_memory && tools::requires_approval(&call.name) {
                             recovery.observe(&call.name, success);
+                        }
+                        // The same error again and again (even with varied arguments) is a loop too.
+                        if failures.observe(&call.name, &observation, success) >= FAILURE_RECOVERY {
+                            failures = FailureStreak::default();
+                            if recoveries >= MAX_RECOVERIES {
+                                let _ = reply.push(
+                                    store,
+                                    events,
+                                    &format!("Stopped: the same error kept happening even after {MAX_RECOVERIES} recovery attempts:\n{}\nSend a message to redirect the agent.", observation.lines().next().unwrap_or("")),
+                                );
+                                return reply.finish(store, events);
+                            }
+                            recoveries += 1;
+                            let _ = reply.push(
+                                store,
+                                events,
+                                &format!("*Recovery mode {recoveries}/{MAX_RECOVERIES}: the same error happened {FAILURE_RECOVERY} times in a row, so the agent was asked to try something different.*"),
+                            );
+                            observation.push_str("\n\n");
+                            observation.push_str(&recovery_guidance(
+                                &format!("{} has failed {FAILURE_RECOVERY} times in a row with the same error, even with different arguments", call.name),
+                                recoveries,
+                            ));
                         }
                         if repeated >= REPEAT_WARNING && index + 1 == response.tool_calls.len() {
                             observation.push_str(&format!("\n\n[Harness note: this exact tool call has now been made {repeated} times in a row with the same arguments. Repeating it will not change the result. Use what you learned, try a different approach, or finish and explain.]"));
@@ -255,6 +298,13 @@ pub(super) fn run_agent(
                 events,
                 "*Recovery: the reply was only a status line, so the agent was asked to act or answer properly.*",
             );
+            continue;
+        }
+        if response.tool_calls.is_empty() && !asked_for_tool && text_choices(&response.content) {
+            // Choices written as text cannot be clicked; have the model ask them properly.
+            asked_for_tool = true;
+            reply.withdraw_turn(store, events);
+            messages.push(serde_json::json!({"role":"user","content":"Harness check: you wrote answer choices as plain text. Ask that question again with the ask_user tool so I can click an answer: one question per call, with its choices as options. Do not repeat the text version."}));
             continue;
         }
         if response.tool_calls.is_empty() {
@@ -421,6 +471,60 @@ fn reason(
     record(&step)
 }
 
+/// Recovery mode's message: name the problem and push for a genuinely different approach.
+fn recovery_guidance(problem: &str, attempt: usize) -> String {
+    format!("Harness recovery mode (attempt {attempt} of {MAX_RECOVERIES}). Problem: {problem}. Doing the same thing again will not work, so be creative and try something genuinely new. Ideas: re-read the exact error and question your assumption about its cause; use a different tool or approach (inspect the files involved, run a smaller test, check versions or paths, read documentation, or search the web if it is on); split the step into a smaller one you can verify; work around it by finishing the parts that are not blocked. If the cause is outside your control (no folder attached, a missing program, a permission, or a decision only the user can make), stop retrying and use ask_user to ask the user how to proceed, with concrete options. If the work is already done, mark tasks completed and summarize. Say your new plan in one sentence, then act on it.")
+}
+
+/// Consecutive failures with the same error, ignoring numbers that vary between attempts.
+#[derive(Default)]
+struct FailureStreak {
+    last: String,
+    count: usize,
+}
+
+impl FailureStreak {
+    fn observe(&mut self, tool: &str, observation: &str, success: bool) -> usize {
+        if success {
+            *self = Self::default();
+            return 0;
+        }
+        let error = observation
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_ascii_digit())
+            .take(200)
+            .collect::<String>();
+        let signature = format!("{tool}:{error}");
+        if signature == self.last {
+            self.count += 1;
+        } else {
+            self.last = signature;
+            self.count = 1;
+        }
+        self.count
+    }
+}
+
+/// True when a reply poses a question with lettered choices written as text, such as
+/// "A) Diamond B) Talc C) Quartz", which should have been an ask_user call.
+fn text_choices(content: &str) -> bool {
+    if !content.contains('?') {
+        return false;
+    }
+    let bytes = content.as_bytes();
+    let marker = |letter: u8| {
+        (0..bytes.len().saturating_sub(1)).any(|i| {
+            bytes[i] == letter
+                && matches!(bytes[i + 1], b')' | b'.')
+                && (i == 0 || matches!(bytes[i - 1], b' ' | b'\n' | b'(' | b'\t'))
+        })
+    };
+    marker(b'A') && marker(b'B') && marker(b'C')
+}
+
 /// True for a reply made only of bracketed status lines such as "[Tools used: ...]" or
 /// "[Updated task list]": an imitation of harness notes, not an answer.
 fn status_only(content: &str) -> bool {
@@ -563,6 +667,8 @@ struct Reply {
     text: String,
     /// No text has arrived yet in the current model turn.
     fresh_turn: bool,
+    /// Length of the text before the current model turn, so that turn can be withdrawn.
+    turn_start: usize,
     saved_at: std::time::Instant,
 }
 
@@ -572,12 +678,27 @@ impl Reply {
             id,
             text: String::new(),
             fresh_turn: true,
+            turn_start: 0,
             saved_at: std::time::Instant::now(),
         }
     }
 
     fn begin_turn(&mut self) {
         self.fresh_turn = true;
+        self.turn_start = self.text.len();
+    }
+
+    /// Remove the current turn's text from the visible reply (it is redone properly).
+    fn withdraw_turn(&mut self, store: &Store, events: &EventSender) {
+        self.text.truncate(self.turn_start);
+        let _ = self.save(store);
+        send(
+            events,
+            AppEvent::ChatReplaced {
+                id: self.id,
+                content: self.text.clone(),
+            },
+        );
     }
 
     /// Append streamed text; turns are separated by a blank line.
@@ -870,7 +991,7 @@ impl Tool<'_> {
             }
             name => {
                 if self.settings.workspace_root.is_empty() {
-                    return Err("No folder is attached to this workspace. Ask the user to attach one in the sidebar.".to_owned());
+                    return Err("No folder is attached to this workspace, so file tools and commands cannot run, and retrying will not help. Use ask_user to ask the user to attach a folder, or continue with what you can do without files.".to_owned());
                 }
                 let result = tools::execute(self.settings, name, &call.arguments, self.cancelled);
                 if tools::requires_approval(name) {
@@ -1346,6 +1467,54 @@ mod run_tests {
     }
 
     #[test]
+    fn choices_written_as_text_are_turned_into_a_question() {
+        assert!(text_choices(
+            "Question 1: What is the hardest substance? A) Diamond B) Talc C) Quartz D) Boron"
+        ));
+        assert!(text_choices("Which one?\nA. Rust\nB. Go\nC. Zig"));
+        assert!(!text_choices("Plan A) is fine. B) next. C) last."));
+        assert!(!text_choices("Step 1. Read the file. 2. Edit it. Ready?"));
+        let ask = serde_json::json!({"content": null, "tool_calls": [{
+            "id": "call00011", "type": "function",
+            "function": {"name": "ask_user", "arguments": serde_json::json!({
+                "question": "Hardest natural substance?", "options": ["Diamond", "Talc", "Quartz"]
+            }).to_string()}
+        }]});
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "Quiz! What is hardest? A) Diamond B) Talc C) Quartz"}),
+            ask,
+            serde_json::json!({"content": "Correct, diamond."}),
+        ]);
+        let store = Store::in_memory();
+        run_queued(
+            &store,
+            url,
+            true,
+            0,
+            vec![AppCommand::AnswerQuestion {
+                request_id: "call00011".into(),
+                answer: "Diamond".into(),
+            }],
+        );
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[1].contains("Ask that question again with the ask_user tool"));
+        assert!(
+            bodies[2].contains("Hardest natural substance?") && bodies[2].contains(": Diamond")
+        );
+        // The text version is withdrawn from the visible reply; the card replaces it.
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(reply, "Correct, diamond.");
+    }
+
+    #[test]
     fn status_line_replies_are_corrected_not_accepted() {
         assert!(status_only("[Updated task list]"));
         assert!(status_only("  [Tools used: Listed files; Read a.py]\n\n"));
@@ -1398,6 +1567,59 @@ mod run_tests {
     }
 
     #[test]
+    fn the_same_error_with_varied_arguments_starts_recovery() {
+        let shell = |n: usize| {
+            serde_json::json!({"content": null, "tool_calls": [{
+                "id": format!("call{n:05}"), "type": "function",
+                "function": {"name": "run_command", "arguments": serde_json::json!({
+                    "command": format!("echo \"Shell test #{n}\"")
+                }).to_string()}
+            }]})
+        };
+        let mut replies = (1..=FAILURE_RECOVERY).map(shell).collect::<Vec<_>>();
+        replies.push(serde_json::json!({"content": "No folder is attached; please attach one."}));
+        let (url, server) = mock_provider(replies);
+        let store = Store::in_memory();
+        // No folder: commands are not offered, and stray calls are rejected without approval.
+        run(&store, url, false);
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), FAILURE_RECOVERY + 1);
+        assert!(!bodies[0].contains("\"run_command\"") && bodies[0].contains("\"ask_user\""));
+        assert!(bodies[0].contains("No folder is attached to this workspace, so you cannot"));
+        assert!(bodies[1].contains("not available: no folder is attached"));
+        assert!(!bodies[FAILURE_RECOVERY - 1].contains("Harness recovery mode"));
+        assert!(bodies[FAILURE_RECOVERY].contains("Harness recovery mode (attempt 1"));
+        assert!(bodies[FAILURE_RECOVERY].contains("try something genuinely new"));
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(
+            reply.contains("Recovery mode 1/") && reply.contains("same error"),
+            "{reply}"
+        );
+
+        let mut streak = FailureStreak::default();
+        assert_eq!(
+            streak.observe("run_command", "Tool error: exit 1 at #23", false),
+            1
+        );
+        assert_eq!(
+            streak.observe("run_command", "Tool error: exit 1 at #24", false),
+            2
+        );
+        assert_eq!(
+            streak.observe("read_file", "Tool error: exit 1 at #24", false),
+            1
+        );
+        assert_eq!(streak.observe("read_file", "ok", true), 0);
+    }
+
+    #[test]
     fn identical_tool_loops_get_recovery_then_stop() {
         let same = || tasks_call(7, serde_json::json!([{"title":"a","status":"pending"}]));
         // Loops into recovery, recovers by doing something different, then loops for good.
@@ -1415,7 +1637,7 @@ mod run_tests {
         assert_eq!(bodies.len(), total);
         assert!(bodies[REPEAT_WARNING].contains("Harness note"));
         assert!(bodies[REPEAT_RECOVERY].contains("Harness recovery mode"));
-        assert!(bodies[REPEAT_RECOVERY].contains("Recovery attempt 1 of"));
+        assert!(bodies[REPEAT_RECOVERY].contains("recovery mode (attempt 1 of"));
         let reply = store
             .conversation_state()
             .unwrap()

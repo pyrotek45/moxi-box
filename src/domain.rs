@@ -267,6 +267,11 @@ pub enum AppEvent {
         id: i64,
         text: String,
     },
+    /// Replace a reply's text, after the harness withdrew part of it.
+    ChatReplaced {
+        id: i64,
+        content: String,
+    },
     ChatFinished {
         id: i64,
     },

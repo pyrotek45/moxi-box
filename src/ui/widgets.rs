@@ -865,6 +865,22 @@ pub fn bubble(ui: &mut egui::Ui, id: i64, role: MessageRole, body: impl FnOnce(&
     });
 }
 
+/// Drop symbols (mostly emoji) that no loaded font can draw, so they never show as empty boxes.
+fn drawable<'a>(ui: &egui::Ui, content: &'a str) -> std::borrow::Cow<'a, str> {
+    let unusual = |c: char| c as u32 >= 0x2000;
+    if !content.chars().any(unusual) {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let font = egui::FontId::proportional(15.0);
+    ui.fonts(|fonts| {
+        content
+            .chars()
+            .filter(|&c| !unusual(c) || fonts.has_glyph(&font, c))
+            .collect::<String>()
+            .into()
+    })
+}
+
 pub fn message_text(ui: &mut egui::Ui, content: &str) {
     // Reuse renderer caches across streaming frames without enabling network image loaders.
     thread_local! {
@@ -878,8 +894,13 @@ pub fn message_text(ui: &mut egui::Ui, content: &str) {
         .show(ui, |ui| {
             ui.set_max_width(width);
 
+            let content = drawable(ui, content);
             MARKDOWN.with(|cache| {
-                egui_commonmark::CommonMarkViewer::new().show(ui, &mut cache.borrow_mut(), content);
+                egui_commonmark::CommonMarkViewer::new().show(
+                    ui,
+                    &mut cache.borrow_mut(),
+                    &content,
+                );
             });
         });
 }
