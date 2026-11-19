@@ -25,6 +25,7 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `edit_file` | Replaces one exact passage in an existing file, or every literal match when `replace_all` is explicitly set; shown as a diff. | Required |
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
 | `run_command` | Runs one shell command from the workspace root, including builds, tests, Git, and `python3` scripts. | Required |
+| `ask_user` | Asks you a multiple-choice question (2–6 options) when the agent needs a decision or missing information; the run waits. Click an option or type your own answer. Also available in Chat mode. | None (you answer) |
 | `remember` | Appends a concise fact to workspace memory, or with `scope: "all"` a lesson to the shared playbook used by every workspace. | Required |
 | `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
@@ -36,6 +37,8 @@ File tools reject traversal and symlink escapes. Paths normally look like `essay
 ## Workspaces, summaries, and memory
 
 A workspace holds one conversation, its memory, and its task list. **+** creates a completely new workspace and asks for a name (leave it blank to name it from your first message); double-click a workspace or click the title above the chat to rename it; hover a workspace and click its × to delete it (after confirmation; files are never touched). Messages, streamed checkpoints, tool activity, and summaries are saved locally in SQLite. Interrupted runs are labelled rather than presented as successful.
+
+Pressing Send while no model is connected (or while reconnecting, or with no model selected) shows a red warning above the composer with **Connect** / **Retry now** and **Provider settings**; your message stays in the box.
 
 In Chat mode, a message that looks like a coding task (for example one naming a file or asking to fix or build something) shows a suggestion to switch to Agent mode before it is sent.
 

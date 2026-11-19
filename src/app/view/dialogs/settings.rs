@@ -233,6 +233,10 @@ fn help_settings(ui: &mut egui::Ui) {
             "Plan and track work in the sidebar task list. Automatic.",
         ),
         (
+            "ask_user",
+            "Ask you a multiple-choice question when a decision is needed. Automatic.",
+        ),
+        (
             "remember",
             "Save a note to workspace memory. Needs approval.",
         ),
