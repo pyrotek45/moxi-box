@@ -27,7 +27,7 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `run_command` | Runs one shell command from the workspace root, including builds, tests, Git, and `python3` scripts. | Required |
 | `ask_user` | Asks you a multiple-choice question (2–6 options) when the agent needs a decision or missing information, or for quizzes and polls; the run waits. If a model writes lettered choices as text instead, Moxi has it ask them again with this tool. Click an option or type your own answer. Also available in Chat mode. | None (you answer) |
 | `remember` | Appends a concise fact to workspace memory, or with `scope: "all"` a lesson to the shared playbook used by every workspace. | Required |
-| `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
+| `web_search` | Searches the web (DuckDuckGo, falling back to DuckDuckGo Lite and Bing when one answers with a bot check) and returns titles, URLs, and snippets. If every engine is blocked it says so instead of reporting "no results". Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
 
 Tool steps appear live in the reply, in order, with plain titles such as "Read src/main.rs" or "Edited src/app.rs". Expand a step to see its result; edits show a red/green diff. Approve runs an operation once; Deny stops the run. **Auto-approve** (Agent mode header or Settings) runs edits, writes, commands, and memory notes without asking for the rest of the session. Send while Moxi works to queue a message: the agent reads it after its current tool round. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
@@ -43,6 +43,8 @@ Pressing Send while no model is connected (or while reconnecting, or with no mod
 In Chat mode, a message that looks like a coding task (for example one naming a file or asking to fix or build something) shows a suggestion to switch to Agent mode before it is sent.
 
 After `write_file` or `edit_file` changes a Python or JSON file, Moxi checks its syntax and tells the agent at once if the change broke it (the idea comes from SWE-agent's linted edits and Aider's lint loop).
+
+The system message (memory, shared playbook, goal, task list, summary, folder snapshot, and the list of tools available in the run) is rebuilt before every model turn, so notes saved or tasks edited during a long run are seen immediately and stale errors from earlier in the chat (for example from before a folder was attached) are marked out of date.
 
 Every message is sent with the workspace's earlier messages, a bounded file/folder snapshot, and applicable `AGENTS.md` or `AGENT.md` files. Root instructions apply to the whole folder; nested instructions apply to their subtree and override conflicts. A short record of the tools earlier replies used is kept in the system message so follow-ups know which files were read or changed; replies that only imitate such a status line are sent back to the model to act or answer properly.
 

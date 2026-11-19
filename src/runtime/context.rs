@@ -77,6 +77,35 @@ pub(super) fn prepare(
     Ok(history)
 }
 
+/// The system message rebuilt from what is saved right now: memory, playbook, goal, tasks,
+/// summary, and the folder snapshot. The agent loop refreshes it before every model turn, so
+/// notes saved or tasks edited during a long run are seen at once.
+pub(super) fn current_system(
+    store: &Store,
+    settings: &Settings,
+    prompt: &str,
+) -> Result<String, String> {
+    let state = store.conversation_state()?;
+    let (summary, through) = store.summary()?;
+    let mut notes = context_notes(
+        (&state.memory, &state.goal, &state.playbook),
+        &store.tasks()?,
+        &summary,
+        &workspace_context(&settings.workspace_root),
+    );
+    notes.extend(
+        tools_used_note(&state.messages, &state.activity, through).map(|content| ChatMessage {
+            id: 0,
+            role: MessageRole::System,
+            content,
+        }),
+    );
+    Ok(lm_studio::provider_messages(prompt, &notes)[0]["content"]
+        .as_str()
+        .unwrap_or(prompt)
+        .to_owned())
+}
+
 /// A record of the tools earlier replies ran, so later turns know which files were read or
 /// changed without replaying tool output. It lives in the system message, never inside the
 /// replies: small models copied an inline "[Tools used: ...]" line as their whole answer.
@@ -178,14 +207,14 @@ fn context_notes(
 /// files are system guidance; the file listing is orientation, not instructions.
 fn workspace_context(root: &str) -> String {
     if root.trim().is_empty() {
-        return "Workspace snapshot: no folder is attached.".to_owned();
+        return "No folder is attached to this workspace right now, so file tools and commands are unavailable.".to_owned();
     }
     let entries = match crate::tools::workspace_entries(root) {
         Ok(entries) => entries,
         Err(error) => return format!("Workspace snapshot unavailable: {error}"),
     };
     let mut output = format!(
-        "Workspace folder: {root}\nFiles and folders (snapshot; inspect files before relying on contents):\n{}",
+        "A folder is attached right now: {root}\nFile tools and commands work in it (in Agent mode). Earlier messages in this conversation that said no folder was attached or that file tools were blocked are out of date; trust current tool results.\nFiles and folders (snapshot; inspect files before relying on contents):\n{}",
         entries
             .iter()
             .take(120)

@@ -60,6 +60,16 @@ pub(super) fn run_agent(
     if settings.web_access {
         definitions.extend(crate::web::definitions());
     }
+    // State exactly which tools exist in this run, so the model never reasons from stale errors.
+    let prompt = format!(
+        "{prompt}\n\nTools available in this run: {}. Web access is {}.",
+        definitions
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        if settings.web_access { "on" } else { "off" }
+    );
     let mut messages = lm_studio::provider_messages(&prompt, &history);
     let mut reply = Reply::new(reply_id);
     let mut context_retries = 0;
@@ -86,6 +96,10 @@ pub(super) fn run_agent(
     }
     loop {
         apply_task_commands(store, events, commands, deferred);
+        // Memory, goal, and tasks may have changed since the last turn.
+        if let Ok(system) = context::current_system(store, &settings, &prompt) {
+            messages[0]["content"] = serde_json::Value::String(system);
+        }
         if let Err(error) = context::compact_agent(
             store,
             runtime,
@@ -1617,6 +1631,58 @@ mod run_tests {
             1
         );
         assert_eq!(streak.observe("read_file", "ok", true), 0);
+    }
+
+    #[test]
+    fn context_is_refreshed_every_turn_and_lists_current_tools() {
+        let (url, server) = mock_provider(vec![serde_json::json!({"content": "Noted."})]);
+        let store = Store::in_memory();
+        store.save_memory("- Prefer pathlib").unwrap();
+        run_queued(
+            &store,
+            url,
+            false,
+            0,
+            vec![AppCommand::AddTask("added during the run".into())],
+        );
+        let bodies = server.join().unwrap();
+        let system: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let system = system["messages"][0]["content"].as_str().unwrap();
+        // The task was added after the run began; the refreshed context includes it.
+        assert!(system.contains("added during the run"), "{system}");
+        assert!(system.contains("Prefer pathlib"));
+        assert!(system.contains("Tools available in this run: "));
+        let tools_line = system
+            .split("Tools available in this run: ")
+            .nth(1)
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap();
+        assert!(tools_line.contains("ask_user") && !tools_line.contains("run_command"));
+        assert!(system.contains("No folder is attached to this workspace right now"));
+    }
+
+    #[test]
+    fn chat_mode_knows_its_tools_and_limits() {
+        let (url, server) = mock_provider(vec![serde_json::json!({"content": "I can chat."})]);
+        let store = Store::in_memory();
+        run(&store, url, true);
+        let bodies = server.join().unwrap();
+        let body: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Tools available in this run: "));
+        assert!(system.contains("need Agent mode") && system.contains("Web access is off"));
+        let offered = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offered,
+            ["list_tasks", "update_tasks", "ask_user", "remember"]
+        );
     }
 
     #[test]
