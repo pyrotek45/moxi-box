@@ -8,11 +8,14 @@ impl MoxiBoxApp {
                 egui::TopBottomPanel::bottom("composer")
                     .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8)))
                     .show_inside(ui, |ui| {
+                        if self.send_blocked.is_some() {
+                            self.send_blocked_bar(ui);
+                        }
                         if self.mode_hint && !self.agent_mode {
                             self.mode_hint_bar(ui);
                         }
                         let dialog_open = self.dialog_open();
-                        let response = ui.add_enabled_ui(!dialog_open, |ui| widgets::composer(ui, &mut self.composer, self.agent_mode, self.run_pending, self.history.browsing())).inner;
+                        let response = ui.add_enabled_ui(!dialog_open, |ui| widgets::composer(ui, &mut self.composer, self.agent_mode, self.run_pending, self.question.is_some(), self.history.browsing())).inner;
                         if let Some(older) = response.history { self.history.navigate(&mut self.composer, older); }
                         else if response.edited { self.history.edited(); self.mode_hint = false; }
                         if response.send { self.send_message(); }
@@ -45,6 +48,7 @@ impl MoxiBoxApp {
                 let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
                 ui.scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
                     if self.approval.is_some() { ui.label(RichText::new("Waiting for your approval").small().color(Color32::LIGHT_YELLOW)); }
+                    else if self.question.is_some() { ui.label(RichText::new("Waiting for your answer").small().color(Color32::LIGHT_YELLOW)); }
                     else if self.run_pending { widgets::working_indicator(ui, &self.waiting_label("Working")); }
                 });
                 ui.add_space(8.0);
@@ -88,6 +92,7 @@ impl MoxiBoxApp {
                                 });
                             }
                             let mut approval_response = None;
+                            let mut answer_choice = None;
                             for message in self.messages.iter().enumerate().filter(|(index,message)| self.show_full_history || message.id > self.compacted_through || *index + 2 >= self.messages.len()).map(|(_,message)| message) {
                                 let streaming = self.streaming_id == Some(message.id);
                                 let steps = self.activity.iter().filter(|step| step.message_id == message.id).collect::<Vec<_>>();
@@ -114,7 +119,7 @@ impl MoxiBoxApp {
                                             ui.add_space(4.0);
                                             ui.push_id("text_end", |ui| widgets::message_text(ui, &content[start..]));
                                         }
-                                        if streaming && self.approval.is_none() {
+                                        if streaming && self.approval.is_none() && self.question.is_none() {
                                             ui.add_space(4.0);
                                             let running = steps.last().is_some_and(|step| step.running);
                                             widgets::working_indicator(ui, &self.waiting_label(if running { "Running tool" } else { "Thinking" }));
@@ -122,6 +127,11 @@ impl MoxiBoxApp {
                                     });
                                 }
                                 if self.streaming_id == Some(message.id) {
+                                    if let Some((_, question, options)) = self.question.clone() {
+                                        if let Some(answer) = widgets::question_card(ui, &question, &options) {
+                                            answer_choice = Some(answer);
+                                        }
+                                    }
                                     if let Some((_, summary, preview)) = self.approval.clone() {
                                         widgets::card().show(ui, |ui| {
                                             ui.label(RichText::new(summary).strong().color(Color32::LIGHT_YELLOW));
@@ -147,6 +157,7 @@ impl MoxiBoxApp {
                                 ui.add_space(6.0);
                             }
                             if let Some(approved) = approval_response { self.resolve_approval(approved); }
+                            if let Some(answer) = answer_choice { self.answer_question(answer); }
                         }
                     });
             });

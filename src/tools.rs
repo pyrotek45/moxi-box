@@ -25,6 +25,7 @@ pub fn definitions() -> Vec<Value> {
         definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string","description":"Path inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the whole task list. Send every task to keep. One call may update or complete many tasks. Example: {\"tasks\":[{\"title\":\"Inspect code\",\"status\":\"in_progress\"}]}", json!({"type":"object","properties":{"tasks":{"type":"array","description":"Complete replacement task list","items":{"type":"object","properties":{"title":{"type":"string","description":"Short task description"},"status":{"type":"string","description":"Current task state","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
+        definition("ask_user", "Ask the user a multiple-choice question when you need a decision or missing information to continue, instead of guessing. Give 2 to 6 short, distinct options; the user can also type their own answer. Ask one question at a time and only when the answer changes what you do.", json!({"type":"object","properties":{"question":{"type":"string","description":"One clear question"},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":6,"description":"Short answer choices, for example [\"Python\", \"Rust\"]"}},"required":["question","options"]})),
         definition("remember", "Save a concise durable note. scope \"workspace\" (default) keeps a fact about this project; scope \"all\" adds a general lesson to the shared playbook used in every workspace, such as how you solved a tricky problem. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["workspace","all"],"description":"workspace (default) or all"}},"required":["note"]})),
         definition(
             "list_files",
@@ -68,6 +69,47 @@ pub fn remember_shared(arguments: &Value) -> Result<bool, String> {
     }
 }
 
+/// Validate an ask_user call: (question, options). Small models sometimes send options as one
+/// comma- or newline-separated string, which is accepted when it splits into 2-6 choices.
+pub fn question_arguments(arguments: &Value) -> Result<(String, Vec<String>), String> {
+    let question = optional_string(arguments, "question", &["prompt", "text"])?
+        .map(str::trim)
+        .filter(|question| !question.is_empty() && question.len() <= 500)
+        .ok_or("Give one nonempty question under 500 characters.")?
+        .to_owned();
+    let options = match arguments
+        .get("options")
+        .or_else(|| arguments.get("choices"))
+    {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(|text| text.trim().to_owned())
+                    .ok_or("Each option must be a string.".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(Value::String(text)) => text
+            .split(if text.contains('\n') { '\n' } else { ',' })
+            .map(|option| option.trim().to_owned())
+            .collect(),
+        _ => return Err("Give options as a list of 2 to 6 short strings.".to_owned()),
+    };
+    let mut unique = Vec::new();
+    for option in options.into_iter().filter(|option| !option.is_empty()) {
+        if option.len() > 120 {
+            return Err("Keep each option under 120 characters.".to_owned());
+        }
+        if !unique.contains(&option) {
+            unique.push(option);
+        }
+    }
+    if !(2..=6).contains(&unique.len()) {
+        return Err("Give 2 to 6 distinct options.".to_owned());
+    }
+    Ok((question, unique))
+}
+
 pub fn requires_approval(name: &str) -> bool {
     matches!(
         name,
@@ -100,6 +142,7 @@ pub fn label(name: &str, arguments: &Value, done: bool) -> String {
         }
         "edit_file" => format!("{} {}", verb("Edit", "Edited"), target("a file")),
         "run_command" => format!("{} {}", verb("Run", "Ran"), command_line(arguments)),
+        "ask_user" => verb("Ask you a question", "Asked you a question"),
         "list_tasks" => verb("Check the task list", "Checked the task list"),
         "update_tasks" => verb("Update the task list", "Updated the task list"),
         "remember" => verb("Save a project note", "Saved a project note"),
@@ -1930,6 +1973,26 @@ mod edit_match_tests {
         assert_eq!(open.last().unwrap().path, "zz_last.txt");
         // A vanished expanded folder is simply absent.
         assert!(tree_entries(root, &["gone".into()]).is_ok());
+    }
+
+    #[test]
+    fn questions_need_two_to_six_distinct_options() {
+        let ask = |value: Value| question_arguments(&value);
+        let (question, options) =
+            ask(json!({"question": " Which language? ", "options": ["Python", "Rust", "Python"]}))
+                .unwrap();
+        assert_eq!(question, "Which language?");
+        assert_eq!(options, ["Python", "Rust"]);
+        assert_eq!(
+            ask(json!({"question": "Q", "options": "a, b, c"}))
+                .unwrap()
+                .1,
+            ["a", "b", "c"]
+        );
+        assert!(ask(json!({"question": "Q", "options": ["only one"]})).is_err());
+        assert!(ask(json!({"question": "", "options": ["a", "b"]})).is_err());
+        assert!(ask(json!({"question": "Q", "options": [1, 2]})).is_err());
+        assert!(ask(json!({"question": "Q", "options": ["1","2","3","4","5","6","7"]})).is_err());
     }
 
     #[test]

@@ -36,6 +36,8 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
             approval_forced: false,
+            send_blocked: None,
+            question: None,
             mode_hint: false,
             chat_confirmed: false,
             activity: vec![],
@@ -566,5 +568,65 @@ fn coding_requests_in_chat_mode_suggest_agent_mode() {
             agent_mode: true,
             ..
         })
+    ));
+}
+
+#[test]
+fn questions_are_answered_by_choice_or_typed_text() {
+    let ((mut app, tx), commands) = fixture_with_commands();
+    app.run_pending = true;
+    tx.send(AppEvent::QuestionAsked {
+        request_id: "call00001".into(),
+        question: "Which?".into(),
+        options: vec!["A".into(), "B".into()],
+    })
+    .unwrap();
+    app.handle_events(&egui::Context::default());
+    assert!(app.question.is_some());
+    app.answer_question("B".into());
+    assert!(app.question.is_none());
+    assert!(matches!(commands.try_recv(),
+        Ok(AppCommand::AnswerQuestion { request_id, answer }) if request_id == "call00001" && answer == "B"));
+    // Typed text answers the waiting question instead of being queued as a new message.
+    app.question = Some((
+        "call00002".into(),
+        "Which?".into(),
+        vec!["A".into(), "B".into()],
+    ));
+    app.workspace_id = Some(1);
+    app.connection.connected = true;
+    app.settings.selected_model = Some("model".into());
+    app.composer = "neither, use C".into();
+    app.send_message();
+    assert!(app.queued.is_empty() && app.composer.is_empty());
+    assert!(matches!(commands.try_recv(),
+        Ok(AppCommand::AnswerQuestion { answer, .. }) if answer == "neither, use C"));
+}
+
+#[test]
+fn sending_without_a_connection_shows_a_clear_warning_and_keeps_the_message() {
+    let ((mut app, _tx), commands) = fixture_with_commands();
+    app.workspace_id = Some(1);
+    app.composer = "hello".into();
+    app.send_message();
+    assert_eq!(app.send_blocked, Some(super::SendBlocked::NotConnected));
+    assert_eq!(app.composer, "hello");
+    assert!(commands.try_recv().is_err());
+    app.connection.connected = true;
+    app.send_message();
+    assert_eq!(app.send_blocked, Some(super::SendBlocked::NoModel));
+    app.settings.selected_model = Some("model".into());
+    app.connection.reconnect = Some(super::connection::Reconnect {
+        attempt: 1,
+        next_at: std::time::Instant::now(),
+    });
+    app.send_message();
+    assert_eq!(app.send_blocked, Some(super::SendBlocked::Reconnecting));
+    app.connection.reconnect = None;
+    app.send_message();
+    assert!(app.send_blocked.is_none());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::SendChat { .. })
     ));
 }
