@@ -458,8 +458,55 @@ pub fn mode_pill(ui: &mut egui::Ui, selected: &mut bool, value: bool, label: &st
     }
 }
 
+/// What a bubble's copy button copies: the message as written, without Moxi's notices.
+pub fn copy_text(message: &ChatMessage) -> String {
+    match message.role {
+        MessageRole::Assistant => crate::provider::lm_studio::model_view(&message.content),
+        _ => message.content.trim().to_owned(),
+    }
+}
+
+/// A small painted copy icon; shows "Copied" briefly after a click.
+pub fn copy_button(ui: &mut egui::Ui, text: &str) {
+    let copied_id = ui.id().with("copied_at");
+    let now = ui.input(|input| input.time);
+    let copied_at: Option<f64> = ui.data(|data| data.get_temp(copied_id));
+    let recently = copied_at.is_some_and(|at| now - at < 1.5);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let painter = ui.painter_at(rect.expand(1.0));
+    let color = if response.hovered() || recently {
+        TEXT
+    } else {
+        TEXT_MUTED
+    };
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, Color32::from_white_alpha(10));
+    }
+    let stroke = egui::Stroke::new(1.2_f32, color);
+    let back = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 3.0), egui::vec2(8.0, 9.0));
+    let front = back.translate(egui::vec2(2.5, 2.5));
+    painter.rect_stroke(back, 2.0, stroke, egui::StrokeKind::Inside);
+    painter.rect_filled(front, 2.0, Color32::from_gray(42));
+    painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Inside);
+    let response = response.on_hover_text("Copy message");
+    if response.clicked() {
+        ui.ctx().copy_text(text.to_owned());
+        ui.data_mut(|data| data.insert_temp(copied_id, now));
+    }
+    if recently {
+        ui.label(RichText::new("Copied").size(11.0).color(TEXT_MUTED));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(300));
+    }
+}
+
 pub fn message_bubble(ui: &mut egui::Ui, message: &ChatMessage, streaming: bool) {
-    bubble(ui, message.id, message.role, |ui| {
+    let copy = if streaming {
+        String::new()
+    } else {
+        copy_text(message)
+    };
+    bubble(ui, message.id, message.role, &copy, |ui| {
         if message.content.is_empty() && streaming {
             working_indicator(ui, "Thinking");
         } else {
@@ -826,7 +873,15 @@ pub fn working_indicator(ui: &mut egui::Ui, label: &str) {
 }
 
 /// A chat bubble whose body is drawn by the caller, e.g. text interleaved with tool steps.
-pub fn bubble(ui: &mut egui::Ui, id: i64, role: MessageRole, body: impl FnOnce(&mut egui::Ui)) {
+/// A message bubble. `copy` is the text the bubble's copy button puts on the clipboard; the
+/// button is hidden while there is nothing to copy.
+pub fn bubble(
+    ui: &mut egui::Ui,
+    id: i64,
+    role: MessageRole,
+    copy: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) {
     let is_user = role == MessageRole::User;
     let width = (ui.available_width() * if is_user { 0.86 } else { 0.96 }).min(780.0);
     ui.push_id(id, |ui| {
@@ -849,14 +904,20 @@ pub fn bubble(ui: &mut egui::Ui, id: i64, role: MessageRole, body: impl FnOnce(&
                     .show(ui, |ui| {
                         ui.with_layout(Layout::top_down(Align::Min), |ui| {
                             ui.set_max_width((width - 32.0).max(1.0));
-                            ui.label(RichText::new(role.label()).size(12.0).strong().color(
-                                if is_user {
-                                    Color32::from_rgb(160, 199, 183)
-                                } else {
-                                    TEXT_MUTED
-                                },
-                            ));
-                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.label(RichText::new(role.label()).size(12.0).strong().color(
+                                    if is_user {
+                                        Color32::from_rgb(160, 199, 183)
+                                    } else {
+                                        TEXT_MUTED
+                                    },
+                                ));
+                                if !copy.trim().is_empty() {
+                                    copy_button(ui, copy);
+                                }
+                            });
+                            ui.add_space(2.0);
                             body(ui);
                         });
                     });
