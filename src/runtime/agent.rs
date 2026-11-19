@@ -1664,6 +1664,28 @@ mod run_tests {
     }
 
     #[test]
+    fn chat_mode_knows_its_tools_and_limits() {
+        let (url, server) = mock_provider(vec![serde_json::json!({"content": "I can chat."})]);
+        let store = Store::in_memory();
+        run(&store, url, true);
+        let bodies = server.join().unwrap();
+        let body: Value = serde_json::from_str(&bodies[0]).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Tools available in this run: "));
+        assert!(system.contains("need Agent mode") && system.contains("Web access is off"));
+        let offered = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offered,
+            ["list_tasks", "update_tasks", "ask_user", "remember"]
+        );
+    }
+
+    #[test]
     fn identical_tool_loops_get_recovery_then_stop() {
         let same = || tasks_call(7, serde_json::json!([{"title":"a","status":"pending"}]));
         // Loops into recovery, recovers by doing something different, then loops for good.
