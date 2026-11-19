@@ -4,6 +4,8 @@
 use serde_json::Value;
 
 const SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
+const LITE_SEARCH_URL: &str = "https://lite.duckduckgo.com/lite/";
+const BING_SEARCH_URL: &str = "https://www.bing.com/search";
 const MAX_RESULTS: usize = 8;
 const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PAGE_CHARS: usize = 12_000;
@@ -34,12 +36,45 @@ pub async fn search(query: &str) -> Result<String, String> {
     if query.is_empty() {
         return Err("Search query must not be empty.".to_owned());
     }
-    let url = reqwest::Url::parse_with_params(SEARCH_URL, &[("q", query)])
-        .map_err(|error| error.to_string())?;
-    let html = get_text(url).await?;
-    let results = parse_search_results(&html);
+    // Search engines sometimes answer automated clients with a bot check instead of results,
+    // which used to look like "no results" for every query. Try several before giving up.
+    type Parser = fn(&str) -> Vec<(String, String, String)>;
+    let engines: [(&str, &str, Parser); 3] = [
+        ("DuckDuckGo", SEARCH_URL, parse_search_results),
+        ("DuckDuckGo Lite", LITE_SEARCH_URL, parse_lite_results),
+        ("Bing", BING_SEARCH_URL, parse_bing_results),
+    ];
+    let mut problems = Vec::new();
+    let mut results = Vec::new();
+    for (name, base, parse) in engines {
+        let url = reqwest::Url::parse_with_params(base, &[("q", query)])
+            .map_err(|error| error.to_string())?;
+        match get_text(url).await {
+            Ok(html) => {
+                results = parse(&html);
+                if !results.is_empty() {
+                    break;
+                }
+                problems.push(if looks_like_bot_check(&html) {
+                    format!("{name} asked for a bot check")
+                } else {
+                    format!("{name} returned no results")
+                });
+            }
+            Err(error) => problems.push(format!("{name}: {error}")),
+        }
+    }
     if results.is_empty() {
-        return Ok(format!("No web results for {query:?}."));
+        let blocked = problems
+            .iter()
+            .any(|problem| !problem.ends_with("no results"));
+        return if blocked {
+            Err(format!("Web search is unavailable right now ({}). This is a problem with the search services, not with your query. Use fetch_url on a site you know (for example official documentation, or https://wttr.in/City+Name?format=4 for weather) or tell the user search is unavailable.", problems.join("; ")))
+        } else {
+            Ok(format!(
+                "No web results for {query:?}. Try different or fewer words."
+            ))
+        };
     }
     Ok(results
         .iter()
@@ -138,6 +173,142 @@ fn parse_search_results(html: &str) -> Vec<(String, String, String)> {
     results
 }
 
+/// Result pages that ask for a human check instead of listing results.
+fn looks_like_bot_check(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    [
+        "anomaly",
+        "captcha",
+        "unusual traffic",
+        "are you a robot",
+        "challenge-form",
+        "bots use",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// (title, url, snippet) from DuckDuckGo Lite's table layout.
+fn parse_lite_results(html: &str) -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+    for block in html.split("result-link").skip(1) {
+        let Some(tag_start) = block.find('>') else {
+            continue;
+        };
+        // The href sits in the same <a> tag, before or after the class attribute.
+        let opening = html_tag_around(html, block);
+        let Some(href) = opening.and_then(|tag| quoted_attribute(&tag, "href")) else {
+            continue;
+        };
+        let title = block[tag_start + 1..]
+            .split_once("</a>")
+            .map_or(String::new(), |(title, _)| html_to_text(title));
+        let snippet = block
+            .split_once("result-snippet")
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .and_then(|(_, rest)| rest.split_once("</td>"))
+            .map_or(String::new(), |(snippet, _)| html_to_text(snippet));
+        let url = result_url(&decode_entities(&href));
+        if !url.is_empty() && !title.is_empty() {
+            results.push((title, url, snippet));
+        }
+        if results.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    results
+}
+
+/// The full opening tag that contains the start of `block` (a slice of `html`).
+fn html_tag_around(html: &str, block: &str) -> Option<String> {
+    let offset = block.as_ptr() as usize - html.as_ptr() as usize;
+    let start = html[..offset].rfind('<')?;
+    let end = offset + block.find('>')?;
+    Some(html[start..end].to_owned())
+}
+
+/// An attribute value in either quote style.
+fn quoted_attribute(tag: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let marker = format!("{name}={quote}");
+        if let Some(start) = tag.find(&marker).map(|index| index + marker.len()) {
+            let end = tag[start..].find(quote)? + start;
+            return Some(tag[start..end].to_owned());
+        }
+    }
+    None
+}
+
+/// (title, url, snippet) from Bing's result list.
+fn parse_bing_results(html: &str) -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+    for block in html.split("class=\"b_algo\"").skip(1) {
+        let Some(heading) = block.split_once("<h2").map(|(_, rest)| rest) else {
+            continue;
+        };
+        let Some(href) = quoted_attribute(heading, "href") else {
+            continue;
+        };
+        let title = heading
+            .split_once("<a")
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .and_then(|(_, rest)| rest.split_once("</a>"))
+            .map_or(String::new(), |(title, _)| html_to_text(title));
+        let snippet = heading
+            .split_once("<p")
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .and_then(|(_, rest)| rest.split_once("</p>"))
+            .map_or(String::new(), |(snippet, _)| html_to_text(snippet));
+        let url = bing_url(&decode_entities(&href));
+        if url.starts_with("http") && !title.is_empty() {
+            results.push((title, url, snippet));
+        }
+        if results.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+    results
+}
+
+/// Bing sometimes wraps links as /ck/a?...&u=a1<base64url of the address>.
+fn bing_url(href: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(href) else {
+        return href.to_owned();
+    };
+    if !url.path().starts_with("/ck/") {
+        return href.to_owned();
+    }
+    url.query_pairs()
+        .find(|(key, _)| key == "u")
+        .and_then(|(_, value)| value.strip_prefix("a1").map(base64url_decode))
+        .flatten()
+        .unwrap_or_else(|| href.to_owned())
+}
+
+fn base64url_decode(text: &str) -> Option<String> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut bytes = Vec::new();
+    for c in text.bytes().take_while(|c| *c != b'=') {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            bytes.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn attribute(tag: &str, name: &str) -> Option<String> {
     let start = tag.find(&format!("{name}=\""))? + name.len() + 2;
     let end = tag[start..].find('"')? + start;
@@ -228,6 +399,35 @@ mod tests {
         assert_eq!(results[0].2, "Learn Rust & have fun.");
         assert_eq!(results[1].1, "https://example.com/");
         assert!(parse_search_results("<html>no results</html>").is_empty());
+    }
+
+    #[test]
+    fn parses_fallback_engines_and_detects_bot_checks() {
+        let lite = r#"<table><tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.python.org%2F" class='result-link'>Welcome to <b>Python</b>.org</a></td></tr>
+            <tr><td class='result-snippet'>The official home of the Python Programming Language.</td></tr>
+            <tr><td><a rel="nofollow" href="https://docs.python.org/3/" class='result-link'>Python docs</a></td></tr></table>"#;
+        let results = parse_lite_results(lite);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Welcome to Python.org");
+        assert_eq!(results[0].1, "https://www.python.org/");
+        assert!(results[0].2.starts_with("The official home"));
+        assert_eq!(results[1].1, "https://docs.python.org/3/");
+
+        let bing = r#"<ol><li class="b_algo" data-x="1"><div class="b_tpcn">x</div><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=1&amp;u=a1aHR0cHM6Ly93d3cucnVzdC1sYW5nLm9yZy8&amp;ntb=1" h="ID=1">Rust <strong>Programming</strong> Language</a></h2>
+            <div class="b_caption"><p class="b_lineclamp2">A language empowering everyone.</p></div></li>
+            <li class="b_algo"><h2><a href="https://example.com/">Example</a></h2></li></ol>"#;
+        let results = parse_bing_results(bing);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Rust Programming Language");
+        assert_eq!(results[0].1, "https://www.rust-lang.org/");
+        assert_eq!(results[0].2, "A language empowering everyone.");
+        assert_eq!(results[1].1, "https://example.com/");
+
+        assert!(looks_like_bot_check(
+            "<form id=\"challenge-form\">Unfortunately, bots use DuckDuckGo too.</form>"
+        ));
+        assert!(!looks_like_bot_check("<html>results</html>"));
+        assert!(parse_lite_results("<html>nothing</html>").is_empty());
     }
 
     #[test]
