@@ -62,7 +62,7 @@ pub(super) fn run_agent(
     }
     // State exactly which tools exist in this run, so the model never reasons from stale errors.
     let prompt = format!(
-        "{prompt}\n\nTools available in this run: {}. Web access is {}.",
+        "{prompt}\n\nTools available in this run: {}. Web access is {}. Every tool in this list works right now. If a call failed earlier in this conversation, that was about that one call (its arguments, a missing file, no folder at the time, a denied approval, or an older version of Moxi), not a broken tool: use the tools normally and judge only by their current results.",
         definitions
             .iter()
             .filter_map(|definition| definition["function"]["name"].as_str())
@@ -174,6 +174,11 @@ pub(super) fn run_agent(
         if let Err(error) = reply.save(store) {
             return fail_run(store, events, error);
         }
+        if response.from_text {
+            // The call text was streamed raw; show only the prose around it.
+            reply.withdraw_turn(store, events);
+            let _ = reply.push(store, events, &response.content);
+        }
         if response.tool_calls.is_empty() {
             messages.push(serde_json::json!({"role":"assistant","content":response.content}));
         } else {
@@ -183,7 +188,7 @@ pub(super) fn run_agent(
                     let _ = reply.push(
                         store,
                         events,
-                        &format!("Stopped: the model kept repeating the same tool call even after {MAX_RECOVERIES} recovery attempts. Send a message to redirect it."),
+                        &lm_studio::harness_note(&format!("Stopped: the model kept repeating the same tool call even after {MAX_RECOVERIES} recovery attempts. Send a message to redirect it.")),
                     );
                     return reply.finish(store, events);
                 }
@@ -192,7 +197,7 @@ pub(super) fn run_agent(
                 let _ = reply.push(
                     store,
                     events,
-                    &format!("*Recovery mode {recoveries}/{MAX_RECOVERIES}: the same tool call was repeated {repeated} times, so it was skipped and the agent was asked to change approach.*"),
+                    &lm_studio::harness_note(&format!("Recovery mode {recoveries}/{MAX_RECOVERIES}: the same tool call was repeated {repeated} times, so it was skipped and the agent was asked to change approach.")),
                 );
                 send(
                     events,
@@ -270,7 +275,7 @@ pub(super) fn run_agent(
                                 let _ = reply.push(
                                     store,
                                     events,
-                                    &format!("Stopped: the same error kept happening even after {MAX_RECOVERIES} recovery attempts:\n{}\nSend a message to redirect the agent.", observation.lines().next().unwrap_or("")),
+                                    &lm_studio::harness_note(&format!("Stopped: the same error kept happening even after {MAX_RECOVERIES} recovery attempts ({}). Send a message to redirect the agent.", observation.lines().next().unwrap_or("").trim_start_matches("Tool error: "))),
                                 );
                                 return reply.finish(store, events);
                             }
@@ -278,7 +283,7 @@ pub(super) fn run_agent(
                             let _ = reply.push(
                                 store,
                                 events,
-                                &format!("*Recovery mode {recoveries}/{MAX_RECOVERIES}: the same error happened {FAILURE_RECOVERY} times in a row, so the agent was asked to try something different.*"),
+                                &lm_studio::harness_note(&format!("Recovery mode {recoveries}/{MAX_RECOVERIES}: the same error happened {FAILURE_RECOVERY} times in a row, so the agent was asked to try something different.")),
                             );
                             observation.push_str("\n\n");
                             observation.push_str(&recovery_guidance(
@@ -292,7 +297,13 @@ pub(super) fn run_agent(
                         lm_studio::append_tool_result(&mut messages, call, &observation)
                     }
                     Ok(None) => {
-                        let _ = reply.push(store, events, "Tool operation was denied by the user.");
+                        let _ = reply.push(
+                            store,
+                            events,
+                            &lm_studio::harness_note(
+                                "You denied the operation, so the run stopped.",
+                            ),
+                        );
                         return reply.finish(store, events);
                     }
                     Err(error) => return fail_run(store, events, error),
@@ -310,7 +321,7 @@ pub(super) fn run_agent(
             let _ = reply.push(
                 store,
                 events,
-                "*Recovery: the reply was only a status line, so the agent was asked to act or answer properly.*",
+                &lm_studio::harness_note("The reply was only a status line, so the agent was asked to act or answer properly."),
             );
             continue;
         }
@@ -770,7 +781,8 @@ impl Reply {
 
     fn finish(mut self, store: &Store, events: &EventSender) {
         if self.text.is_empty() {
-            if let Err(error) = self.push(store, events, "Agent run completed.") {
+            if let Err(error) = self.push(store, events, &lm_studio::harness_note("Run completed."))
+            {
                 return fail_run(store, events, error);
             }
         }
@@ -1661,6 +1673,117 @@ mod run_tests {
             .unwrap();
         assert!(tools_line.contains("ask_user") && !tools_line.contains("run_command"));
         assert!(system.contains("No folder is attached to this workspace right now"));
+    }
+
+    #[test]
+    fn text_tool_calls_run_and_attaching_a_folder_later_enables_file_tools() {
+        let folder = std::env::temp_dir().join(format!("moxi-later-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("notes.txt"), "hello from the folder").unwrap();
+        let store = Store::in_memory();
+        // First message: no folder, so file tools are not offered.
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "Attach a folder first."}),
+        ]);
+        run(&store, url, false);
+        let first = server.join().unwrap();
+        assert!(!first[0].contains("\"read_file\""));
+
+        // The user attaches a folder; the next message offers file tools and says so.
+        store.set_folder(folder.to_str().unwrap()).unwrap();
+        let (url, server) = mock_provider(vec![
+            serde_json::json!({"content": "Reading it now.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"notes.txt\"}}\n</tool_call>"}),
+            serde_json::json!({"content": "It says hello."}),
+        ]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let events = EventSender {
+            channel: sender,
+            wake: Box::new(|| {}),
+        };
+        let (_tx, commands) = std::sync::mpsc::channel();
+        run_agent(
+            &store,
+            &Runtime::new().unwrap(),
+            &events,
+            &commands,
+            &mut VecDeque::new(),
+            AgentRequest {
+                settings: Settings {
+                    lm_studio_url: url,
+                    selected_model: Some("mock".into()),
+                    workspace_root: store.folder().unwrap(),
+                    ..Settings::default()
+                },
+                content: "read notes.txt".into(),
+                auto_approve: Default::default(),
+                chat: false,
+            },
+            &AtomicBool::new(false),
+        );
+        drop(receiver);
+        let bodies = server.join().unwrap();
+        assert!(bodies[0].contains("\"read_file\""));
+        assert!(bodies[0].contains("A folder is attached right now"));
+        assert!(bodies[0].contains("are out of date"));
+        // The call written as text was executed and its result returned to the model.
+        assert!(bodies[1].contains("hello from the folder"), "{}", bodies[1]);
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(!reply.contains("<tool_call>"), "{reply}");
+        assert!(reply.starts_with("Reading it now.") && reply.ends_with("It says hello."));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn past_failures_do_not_reach_the_model_as_broken_tools() {
+        let store = Store::in_memory();
+        store
+            .add_message(MessageRole::User, "test your shell")
+            .unwrap();
+        let reply = store.add_message(MessageRole::Assistant, "").unwrap();
+        let step = |call_id: &str, title: &str| AgentActivity {
+            message_id: reply,
+            offset: 0,
+            call_id: call_id.into(),
+            title: title.into(),
+            detail: String::new(),
+            running: false,
+        };
+        store
+            .record_tool(&step("a", "Failed · Run echo \"Shell test #23\""))
+            .unwrap();
+        store
+            .record_tool(&step("b", "Interrupted · Read a.py"))
+            .unwrap();
+        store.record_tool(&step("c", "Read notes.md")).unwrap();
+        let saved = format!(
+            "I'm hitting a persistent error.\n\n{}\n\n*Recovery mode 1/3: legacy text*\n\nStopped: the same error kept happening.\n\n[Run interrupted: Stopped by user.]",
+            lm_studio::harness_note("Recovery mode 2/3: the same error happened 3 times.")
+        );
+        store.replace_message_content(reply, &saved).unwrap();
+        let (url, server) = mock_provider(vec![serde_json::json!({"content": "Working now."})]);
+        run(&store, url, false);
+        let body = server.join().unwrap().remove(0);
+        // The model keeps its own words but never sees harness notices or failed steps.
+        assert!(body.contains("I'm hitting a persistent error."));
+        for leaked in [
+            "Moxi note",
+            "Recovery mode",
+            "Stopped:",
+            "Run interrupted",
+            "Failed ·",
+            "Interrupted ·",
+        ] {
+            assert!(!body.contains(leaked), "{leaked} leaked into: {body}");
+        }
+        assert!(body.contains("Read notes.md"));
+        assert!(body.contains("Every tool in this list works right now"));
     }
 
     #[test]

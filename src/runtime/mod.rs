@@ -205,7 +205,9 @@ fn handle(
             let result = tools::reset_workspace(&path).and_then(|backup| {
                 store.add_message(
                     MessageRole::Assistant,
-                    &format!("Folder reset. Original files are archived at:\n{backup}"),
+                    &lm_studio::harness_note(&format!(
+                        "Folder reset. The original files are archived at {backup}"
+                    )),
                 )?;
                 send(
                     events,
