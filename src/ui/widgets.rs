@@ -9,6 +9,7 @@ pub enum ProviderStatus {
     OnlineNoModel,
     Ready,
     Available,
+    Reconnecting,
 }
 
 pub use super::theme::{ACCENT, SURFACE, SURFACE_RAISED, TEXT, TEXT_MUTED};
@@ -397,6 +398,7 @@ pub fn status_badge(ui: &mut egui::Ui, status: ProviderStatus) {
         ProviderStatus::OnlineNoModel => (Color32::from_rgb(222, 185, 105), "Connected · no model"),
         ProviderStatus::Ready => (ACCENT, "Connected"),
         ProviderStatus::Available => (TEXT_MUTED, "Available"),
+        ProviderStatus::Reconnecting => (Color32::from_rgb(222, 185, 105), "Reconnecting…"),
     };
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());

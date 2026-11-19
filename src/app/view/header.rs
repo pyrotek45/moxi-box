@@ -28,13 +28,30 @@ impl MoxiBoxApp {
                         if ui.add_enabled(!self.connection.checking,widgets::secondary_button("Refresh")).on_hover_text("Discover model IDs without connecting or loading a model").clicked() {
                             self.refresh_models(false);
                         }
-                        if ui.add(widgets::primary_button(if self.connection.checking { "Cancel" } else if self.connection.connected { "Disconnect" } else { "Connect" })).clicked() {
-                            if self.connection.connected || self.connection.checking { self.cancelled.store(true,std::sync::atomic::Ordering::Release); self.connection.disconnect(); self.connection.error = None; }
+                        let reconnecting = self.connection.reconnect.is_some();
+                        if ui.add(widgets::primary_button(if self.connection.checking || reconnecting { "Cancel" } else if self.connection.connected { "Disconnect" } else { "Connect" })).on_hover_text(if reconnecting { "Stop reconnecting" } else { "" }).clicked() {
+                            if self.connection.connected || self.connection.checking || reconnecting { self.cancelled.store(true,std::sync::atomic::Ordering::Release); self.connection.disconnect(); self.connection.error = None; }
                             else { self.refresh_models(true); }
                         }
                     });
                 });
-                if self.connection.checking { ui.label(RichText::new("Contacting model server…").small().color(TEXT_MUTED)); }
+                if let Some(attempt) = self.connection.reconnect.as_ref().map(|reconnect| reconnect.attempt) {
+                    let state = if self.connection.checking {
+                        format!("Reconnecting now (attempt {})…", attempt)
+                    } else if self.run_pending {
+                        "Will reconnect when the current run stops.".to_owned()
+                    } else {
+                        format!("Next attempt in {}s.", self.connection.retry_in().unwrap_or(0).max(1))
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 3.0, Color32::from_rgb(222, 185, 105));
+                        ui.label(RichText::new(format!("Connection lost. Reconnecting automatically. {state}")).small().color(Color32::from_rgb(222, 185, 105)));
+                        if !self.connection.checking && !self.run_pending && widgets::link_button(ui, "Retry now").clicked() {
+                            self.retry_connection();
+                        }
+                    });
+                } else if self.connection.checking { ui.label(RichText::new("Contacting model server…").small().color(TEXT_MUTED)); }
                 if let Some(error) = &self.connection.error {
                     let summary = if crate::provider::lm_studio::is_unreachable(error) { "Cannot reach the model server. Check the URL and that its server is running." } else { "The model server returned an error. See details." };
                     ui.add(egui::Label::new(RichText::new(summary).small().color(Color32::from_rgb(224, 155, 143))).wrap());

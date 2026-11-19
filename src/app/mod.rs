@@ -213,7 +213,10 @@ impl MoxiBoxApp {
                     self.models_loaded(request_id, result)
                 }
                 AppEvent::WorkspaceOpened(result) => self.workspace_opened(result),
-                AppEvent::ProviderUnreachable => self.connection.disconnect(),
+                AppEvent::ProviderUnreachable => {
+                    let reason = "The model server stopped responding during the run.".to_owned();
+                    self.connection_lost(reason);
+                }
                 AppEvent::WorkspaceLoaded { root, entries } => {
                     if root == self.settings.workspace_root {
                         self.tree_pending = false;
@@ -345,7 +348,14 @@ impl MoxiBoxApp {
                     self.streaming_id = None;
                     self.run_pending = false;
                     self.approval = None;
-                    self.notice = Some(message);
+                    if self.connection.reconnect.is_some()
+                        && crate::provider::lm_studio::is_unreachable(&message)
+                    {
+                        // The header already explains the lost connection and the retries.
+                        self.connection.error = Some(message);
+                    } else {
+                        self.notice = Some(message);
+                    }
                 }
             }
             context.request_repaint();
@@ -361,6 +371,13 @@ impl MoxiBoxApp {
         }
         if self.workspace_id.is_none() {
             self.notice = Some("Create a workspace first.".to_owned());
+            return;
+        }
+        if self.connection.reconnect.is_some() {
+            self.notice = Some(
+                "Reconnecting to the model server… Your message is kept; send it once connected."
+                    .to_owned(),
+            );
             return;
         }
         if !self.connection.connected {
@@ -523,7 +540,9 @@ impl MoxiBoxApp {
     }
 
     fn provider_status(&self) -> ProviderStatus {
-        if self.connection.checking {
+        if self.connection.reconnect.is_some() {
+            ProviderStatus::Reconnecting
+        } else if self.connection.checking {
             ProviderStatus::Checking
         } else if self.connection.connected && self.settings.selected_model.is_none() {
             ProviderStatus::OnlineNoModel

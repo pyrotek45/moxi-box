@@ -5,9 +5,11 @@ use lm_studio::ToolCall;
 const MAX_OBSERVATION_BYTES: usize = 4000;
 /// Tools offered in Chat mode, besides web tools when Web access is on.
 const CHAT_TOOLS: [&str; 2] = ["list_tasks", "update_tasks"];
-/// Identical consecutive tool rounds before the model is warned, and before the run stops.
+/// Identical consecutive tool rounds before the model is warned, and before recovery mode.
 const REPEAT_WARNING: usize = 3;
-const REPEAT_STOP: usize = 6;
+const REPEAT_RECOVERY: usize = 5;
+/// Recovery attempts per run before a still-repeating agent is stopped.
+const MAX_RECOVERIES: usize = 3;
 
 pub(super) fn run_agent(
     store: &Store,
@@ -58,59 +60,18 @@ pub(super) fn run_agent(
     // (or it explains why not), when it loops on identical calls, or when the user presses Stop.
     let mut gate = TaskGate::default();
     let mut repeats = Repeats::default();
-    let passes = settings.reasoning.min(3) as usize;
-    for pass in 1..=passes {
-        let request = if pass == 1 {
-            format!("[Reasoning step 1 of {passes}. Do not call tools yet. Think the request through in plain text: what exactly is being asked, what you need to inspect, whether it needs a multi-step plan (if so, list the steps you will put in the task list) or is a quick single action, the risks, and how you will verify the result.]")
-        } else {
-            format!("[Reasoning step {pass} of {passes}. Still no tools. Critique the reasoning above: find gaps, wrong assumptions, or a simpler approach, and refine the plan.]")
-        };
-        // Fold the instruction into the latest user turn so roles keep alternating.
-        if pass == 1 {
-            if let Some(content) = messages
-                .last_mut()
-                .and_then(|message| message.get_mut("content"))
-                .filter(|content| content.is_string())
-            {
-                *content = serde_json::Value::String(format!(
-                    "{}\n\n{request}",
-                    content.as_str().unwrap_or("")
-                ));
-            }
-        } else {
-            messages.push(serde_json::json!({"role":"user","content":request}));
-        }
-        if let Err(error) = reply.push(store, events, &format!("*Reasoning {pass}/{passes}*")) {
-            return fail_run(store, events, error);
-        }
-        reply.begin_turn();
-        let response = match runtime.block_on(lm_studio::agent_turn(
-            &settings,
-            &messages,
-            Vec::new(),
-            cancelled,
-            |delta| {
-                if let Some(text) = delta {
-                    reply.stream(store, events, text);
-                } else {
-                    send(events, AppEvent::RunProgress);
-                }
-            },
-        )) {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = reply.save(store);
-                return provider_failed(store, events, cancelled, error);
-            }
-        };
-        if let Err(error) = reply.save(store) {
-            return fail_run(store, events, error);
-        }
-        messages.push(serde_json::json!({"role":"assistant","content":response.content}));
-    }
-    if passes > 0 {
-        messages.push(serde_json::json!({"role":"user","content":"Now carry out the request using your reasoning. If it needs several steps, first record the plan with update_tasks; otherwise act directly."}));
-        let _ = reply.push(store, events, "*Acting on the plan*");
+    let mut recoveries = 0;
+    if let Err(error) = reason(
+        store,
+        runtime,
+        events,
+        &settings,
+        &mut messages,
+        cancelled,
+        reply.id,
+    ) {
+        let _ = reply.save(store);
+        return provider_failed(store, events, cancelled, error);
     }
     loop {
         apply_task_commands(store, events, commands, deferred);
@@ -192,13 +153,43 @@ pub(super) fn run_agent(
             messages.push(serde_json::json!({"role":"assistant","content":response.content}));
         } else {
             let repeated = repeats.observe(&response.tool_calls);
-            if repeated >= REPEAT_STOP {
+            if repeated >= REPEAT_RECOVERY {
+                if recoveries >= MAX_RECOVERIES {
+                    let _ = reply.push(
+                        store,
+                        events,
+                        &format!("Stopped: the model kept repeating the same tool call even after {MAX_RECOVERIES} recovery attempts. Send a message to redirect it."),
+                    );
+                    return reply.finish(store, events);
+                }
+                recoveries += 1;
+                // Recovery mode: skip the repeated calls and tell the model exactly what is wrong.
                 let _ = reply.push(
                     store,
                     events,
-                    &format!("Stopped: the model repeated the same tool call {repeated} times without making progress. Send a message to continue or redirect it."),
+                    &format!("*Recovery mode {recoveries}/{MAX_RECOVERIES}: the same tool call was repeated {repeated} times, so it was skipped and the agent was asked to change approach.*"),
                 );
-                return reply.finish(store, events);
+                send(
+                    events,
+                    AppEvent::Notice(
+                        "The agent was looping; recovery mode asked it to change approach.".into(),
+                    ),
+                );
+                lm_studio::append_tool_calls(&mut messages, &response);
+                let names = response
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for call in &response.tool_calls {
+                    lm_studio::append_tool_result(
+                        &mut messages,
+                        call,
+                        &format!("NOT RUN. Harness recovery mode: you have made this exact call ({names}) with identical arguments {repeated} times in a row, and repeating it cannot give a different result. Stop and diagnose: 1) restate what you are trying to achieve and what the earlier results told you; 2) check the task list and the last error; 3) choose a different action, such as reading the relevant file, running a test to see the real error, changing the arguments, using another tool, or searching the web if it is on; 4) if the work is already done, mark tasks completed and summarize; if you are truly blocked, explain the blocker to the user. Recovery attempt {recoveries} of {MAX_RECOVERIES}."),
+                    );
+                }
+                continue;
             }
             lm_studio::append_tool_calls(&mut messages, &response);
             for (index, call) in response.tool_calls.iter().enumerate() {
@@ -292,6 +283,118 @@ pub(super) fn run_agent(
             return reply.finish(store, events);
         }
     }
+}
+
+/// Optional thinking passes before the tool loop (Settings: Reasoning). The thoughts appear as
+/// one collapsible step instead of reply text, a trivial request skips the remaining passes,
+/// and a pass that returns nothing is ignored rather than failing the run.
+fn reason(
+    store: &Store,
+    runtime: &Runtime,
+    events: &EventSender,
+    settings: &Settings,
+    messages: &mut Vec<serde_json::Value>,
+    cancelled: &AtomicBool,
+    message_id: i64,
+) -> Result<(), String> {
+    let passes = settings.reasoning.min(3) as usize;
+    if passes == 0 {
+        return Ok(());
+    }
+    let original = messages.clone();
+    let mut step = AgentActivity {
+        message_id,
+        offset: 0,
+        call_id: "reasoning".to_owned(),
+        title: "Thinking it through…".to_owned(),
+        detail: String::new(),
+        running: true,
+    };
+    let record = |step: &AgentActivity| -> Result<(), String> {
+        store.record_tool(step)?;
+        send(events, AppEvent::ToolActivity(step.clone()));
+        Ok(())
+    };
+    record(&step)?;
+    let mut thoughts = Vec::new();
+    for pass in 1..=passes {
+        let instruction = if pass == 1 {
+            format!("[Think before acting (step 1 of {passes}). Do not call tools and do not answer yet. In a few short bullet points: what exactly is being asked, what you need to inspect first, whether it needs a multi-step plan (list the steps) or is a single quick action, the main risk, and how you will verify the result. If the message is a greeting or a trivial question, reply with only the word SIMPLE.]")
+        } else {
+            format!("[Think before acting (step {pass} of {passes}). Still no tools. Briefly check the plan above for gaps, wrong assumptions, or a simpler approach, and give the corrected plan.]")
+        };
+        if pass == 1 {
+            // Fold the instruction into the latest user turn so roles keep alternating.
+            if let Some(content) = messages
+                .last_mut()
+                .and_then(|message| message.get_mut("content"))
+                .filter(|content| content.is_string())
+            {
+                let text = format!("{}\n\n{instruction}", content.as_str().unwrap_or(""));
+                *content = serde_json::Value::String(text);
+            }
+        } else {
+            messages.push(serde_json::json!({"role":"user","content":instruction}));
+        }
+        let mut progress_at = std::time::Instant::now();
+        let result = runtime.block_on(lm_studio::agent_turn(
+            settings,
+            messages,
+            Vec::new(),
+            cancelled,
+            |_| {
+                if progress_at.elapsed() >= std::time::Duration::from_millis(250) {
+                    progress_at = std::time::Instant::now();
+                    send(events, AppEvent::RunProgress);
+                }
+            },
+        ));
+        let thought = match result {
+            Ok(response) => response.content.trim().to_owned(),
+            // A thinking model may put everything in hidden reasoning; that is not a failure.
+            Err(error) if error.contains("empty assistant turn") => String::new(),
+            Err(error) => {
+                step.running = false;
+                step.title = "Thinking interrupted".to_owned();
+                let _ = record(&step);
+                return Err(error);
+            }
+        };
+        let simple = thought
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .eq_ignore_ascii_case("simple");
+        if thought.is_empty() || simple {
+            break;
+        }
+        messages.push(serde_json::json!({"role":"assistant","content":thought}));
+        thoughts.push(thought);
+    }
+    // The tool loop starts from the original request plus the agreed plan as one clean turn.
+    *messages = original;
+    step.running = false;
+    if thoughts.is_empty() {
+        step.title = "Thinking skipped: simple request".to_owned();
+    } else {
+        step.title = format!(
+            "Thought it through ({} step{})",
+            thoughts.len(),
+            if thoughts.len() == 1 { "" } else { "s" }
+        );
+        step.detail = thoughts.join("\n\n");
+        if let Some(content) = messages
+            .last_mut()
+            .and_then(|message| message.get_mut("content"))
+            .filter(|content| content.is_string())
+        {
+            let text = format!(
+                "{}\n\n[Your plan from thinking it through. Follow it; if it has several steps, record them with update_tasks first.]\n{}",
+                content.as_str().unwrap_or(""),
+                thoughts.last().unwrap()
+            );
+            *content = serde_json::Value::String(text);
+        }
+    }
+    record(&step)
 }
 
 /// Apply sidebar task edits made during a run before the next model turn; other commands stay
@@ -1002,20 +1105,20 @@ mod run_tests {
     }
 
     #[test]
-    fn reasoning_passes_run_without_tools_and_keep_roles_alternating() {
+    fn reasoning_passes_run_without_tools_and_hand_over_one_clean_turn() {
         let (url, server) = mock_provider(vec![
             serde_json::json!({"content": "It is a one-line change."}),
-            serde_json::json!({"content": "No gaps found."}),
+            serde_json::json!({"content": "Plan: edit one line, then run the test."}),
             serde_json::json!({"content": "Done."}),
         ]);
         let store = Store::in_memory();
-        run_with(&store, url, false, 2);
+        let events = run_with(&store, url, false, 2);
         let bodies = server.join().unwrap();
         assert_eq!(bodies.len(), 3);
         let first: Value = serde_json::from_str(&bodies[0]).unwrap();
         assert!(first.get("tools").is_none());
-        assert!(bodies[0].contains("Reasoning step 1 of 2"));
-        assert!(bodies[1].contains("Reasoning step 2 of 2"));
+        assert!(bodies[0].contains("step 1 of 2"));
+        assert!(bodies[1].contains("step 2 of 2"));
         let last: Value = serde_json::from_str(&bodies[2]).unwrap();
         assert!(last.get("tools").is_some());
         let roles = last["messages"]
@@ -1024,10 +1127,70 @@ mod run_tests {
             .iter()
             .map(|message| message["role"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(
-            roles,
-            ["system", "user", "assistant", "user", "assistant", "user"]
-        );
+        assert_eq!(roles, ["system", "user"]);
+        let request = last["messages"][1]["content"].as_str().unwrap();
+        assert!(request.contains("Plan: edit one line") && !request.contains("step 1 of"));
+        // Thoughts live in a collapsible step, not in the reply text.
+        let reply = store
+            .conversation_state()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert_eq!(reply, "Done.");
+        assert!(events.iter().any(|event| matches!(event,
+            AppEvent::ToolActivity(step) if !step.running && step.title.starts_with("Thought it through (2 steps)")
+                && step.detail.contains("one-line change"))));
+    }
+
+    #[test]
+    fn simple_requests_and_empty_thoughts_skip_reasoning() {
+        for first in [
+            serde_json::json!({"content": "SIMPLE"}),
+            serde_json::json!({"content": ""}),
+        ] {
+            let (url, server) =
+                mock_provider(vec![first, serde_json::json!({"content": "Hi there!"})]);
+            let store = Store::in_memory();
+            run_with(&store, url, false, 3);
+            let bodies = server.join().unwrap();
+            assert_eq!(bodies.len(), 2);
+            let last: Value = serde_json::from_str(&bodies[1]).unwrap();
+            assert_eq!(last["messages"].as_array().unwrap().len(), 2);
+            assert!(!bodies[1].contains("Think before acting"));
+            let reply = store
+                .conversation_state()
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .clone();
+            assert_eq!(reply, "Hi there!");
+        }
+    }
+
+    #[test]
+    fn identical_tool_loops_get_recovery_then_stop() {
+        let same = || tasks_call(7, serde_json::json!([{"title":"a","status":"pending"}]));
+        // Loops into recovery, recovers by doing something different, then loops for good.
+        let mut replies = (0..REPEAT_RECOVERY).map(|_| same()).collect::<Vec<_>>();
+        replies.push(tasks_call(
+            8,
+            serde_json::json!([{"title":"b","status":"pending"}]),
+        ));
+        replies.extend((0..REPEAT_RECOVERY + MAX_RECOVERIES - 1).map(|_| same()));
+        let total = replies.len();
+        let (url, server) = mock_provider(replies);
+        let store = Store::in_memory();
+        run(&store, url, false);
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies.len(), total);
+        assert!(bodies[REPEAT_WARNING].contains("Harness note"));
+        assert!(bodies[REPEAT_RECOVERY].contains("Harness recovery mode"));
+        assert!(bodies[REPEAT_RECOVERY].contains("Recovery attempt 1 of"));
         let reply = store
             .conversation_state()
             .unwrap()
@@ -1037,28 +1200,9 @@ mod run_tests {
             .content
             .clone();
         assert!(
-            reply.contains("one-line change") && reply.ends_with("Done."),
+            reply.contains("Recovery mode 1/") && reply.contains("even after"),
             "{reply}"
         );
-    }
-
-    #[test]
-    fn identical_tool_loops_are_warned_then_stopped() {
-        let same = || tasks_call(7, serde_json::json!([{"title":"a","status":"pending"}]));
-        let (url, server) = mock_provider((0..REPEAT_STOP).map(|_| same()).collect());
-        let store = Store::in_memory();
-        run(&store, url, false);
-        let bodies = server.join().unwrap();
-        assert!(bodies[REPEAT_WARNING].contains("Harness note"));
-        let reply = store
-            .conversation_state()
-            .unwrap()
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .clone();
-        assert!(reply.contains("repeated the same tool call"), "{reply}");
     }
 }
 

@@ -424,3 +424,78 @@ fn waiting_label_reports_silence_not_total_time() {
     app.handle_events(&egui::Context::default());
     assert_eq!(app.waiting_label("Thinking"), "Thinking");
 }
+
+#[test]
+fn lost_connection_warns_and_reconnects_automatically() {
+    let ((mut app, _tx), commands) = fixture_with_commands();
+    let context = egui::Context::default();
+    app.settings.selected_model = Some("model".into());
+    app.refresh_models(true);
+    app.models_loaded(app.connection.request_id, Ok(vec!["model".into()]));
+    assert!(matches!(app.provider_status(), ProviderStatus::Ready));
+    while commands.try_recv().is_ok() {}
+
+    // A quiet health check that fails marks the loss and schedules a retry.
+    app.connection.checked_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    app.tick_connection(&context);
+    assert!(app.connection.probing);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(AppCommand::RefreshModels { .. })
+    ));
+    app.models_loaded(
+        app.connection.request_id,
+        Err("Cannot reach the provider: refused".into()),
+    );
+    assert!(!app.connection.connected);
+    assert!(matches!(
+        app.provider_status(),
+        ProviderStatus::Reconnecting
+    ));
+
+    // A failed attempt backs off; a later success restores the connection.
+    app.connection.reconnect.as_mut().unwrap().next_at = std::time::Instant::now();
+    app.tick_connection(&context);
+    assert!(app.connection.checking);
+    app.models_loaded(
+        app.connection.request_id,
+        Err("Cannot reach the provider".into()),
+    );
+    let reconnect = app.connection.reconnect.as_ref().unwrap();
+    assert_eq!(reconnect.attempt, 1);
+    assert!(app.connection.retry_in().unwrap() >= 3);
+    app.retry_connection();
+    app.models_loaded(app.connection.request_id, Ok(vec!["model".into()]));
+    assert!(app.connection.connected && app.connection.reconnect.is_none());
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Reconnected to the model server.")
+    );
+
+    // Disconnect stops retrying, and a never-connected provider does not auto-retry.
+    app.connection_lost("gone".into());
+    app.connection.disconnect();
+    assert!(app.connection.reconnect.is_none());
+    app.connection_lost("gone".into());
+    assert!(app.connection.reconnect.is_none());
+}
+
+#[test]
+fn a_dropped_run_reports_and_starts_reconnecting() {
+    let (mut app, tx) = fixture();
+    app.connection.connected = true;
+    app.run_pending = true;
+    tx.send(AppEvent::ProviderUnreachable).unwrap();
+    tx.send(AppEvent::RunFailed(
+        "Cannot reach the provider: reset".into(),
+    ))
+    .unwrap();
+    app.handle_events(&egui::Context::default());
+    assert!(app.connection.reconnect.is_some());
+    assert!(!app.run_pending);
+    assert!(app.notice.is_none());
+    assert_eq!(
+        app.connection.error.as_deref(),
+        Some("Cannot reach the provider: reset")
+    );
+}
