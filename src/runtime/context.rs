@@ -65,7 +65,12 @@ pub(super) fn prepare(
             },
         );
     }
-    let mut history = context_notes(&state.memory, &tasks, &summary, &workspace);
+    let mut history = context_notes(
+        (&state.memory, &state.goal, &state.playbook),
+        &tasks,
+        &summary,
+        &workspace,
+    );
     history.extend(recent);
     Ok(history)
 }
@@ -89,7 +94,12 @@ fn note_tools_used(message: &mut ChatMessage, activity: &[crate::domain::AgentAc
 
 /// Memory, the task checklist, and the summary are context for the model, folded into
 /// its single system message.
-fn context_notes(memory: &str, tasks: &[Task], summary: &str, workspace: &str) -> Vec<ChatMessage> {
+fn context_notes(
+    (memory, goal, playbook): (&str, &str, &str),
+    tasks: &[Task],
+    summary: &str,
+    workspace: &str,
+) -> Vec<ChatMessage> {
     let note = |content: String| ChatMessage {
         id: 0,
         role: MessageRole::System,
@@ -99,8 +109,18 @@ fn context_notes(memory: &str, tasks: &[Task], summary: &str, workspace: &str) -
     if !workspace.is_empty() {
         notes.push(note(workspace.to_owned()));
     }
+    if !goal.is_empty() {
+        notes.push(note(format!("The user's goal for this workspace (work toward it; track the steps with update_tasks):\n{goal}")));
+    }
+    if !playbook.is_empty() {
+        notes.push(note(format!(
+            "Shared playbook (lessons from earlier work in any workspace):\n{playbook}"
+        )));
+    }
     if !memory.is_empty() {
-        notes.push(note(format!("User-maintained workspace memory:\n{memory}")));
+        notes.push(note(format!(
+            "Workspace memory (project facts and lessons from earlier work):\n{memory}"
+        )));
     }
     if !tasks.is_empty() {
         let list = tasks
@@ -264,9 +284,9 @@ pub(super) fn compact_agent(
     events: &EventSender,
     messages: &mut Vec<Value>,
     cancelled: &AtomicBool,
-    state: (i64, Option<usize>),
+    state: (i64, Option<usize>, &str),
 ) -> Result<(), String> {
-    let (user_id, learned_limit) = state;
+    let (user_id, learned_limit, prompt) = state;
     let Some(limit) = learned_limit else {
         return Ok(());
     };
@@ -325,14 +345,18 @@ pub(super) fn compact_agent(
         summary = runtime.block_on(lm_studio::summarize(settings, &summary, &chunk, cancelled))?;
     }
     let workspace = workspace_context(&settings.workspace_root);
-    let mut history = context_notes(&store.memory()?, &store.tasks()?, &summary, &workspace);
+    let mut history = context_notes(
+        (&store.memory()?, &store.goal()?, &store.playbook()?),
+        &store.tasks()?,
+        &summary,
+        &workspace,
+    );
     history.push(ChatMessage {
         id: 0,
         role: MessageRole::User,
         content: request,
     });
-    let mut compact =
-        lm_studio::provider_messages(&lm_studio::agent_prompt(settings.web_access), &history);
+    let mut compact = lm_studio::provider_messages(prompt, &history);
     compact.extend_from_slice(&messages[split..]);
     if serde_json::to_vec(&compact)
         .map_err(|e| e.to_string())?
@@ -552,7 +576,11 @@ mod tests {
             &events,
             &mut messages,
             &AtomicBool::new(false),
-            (user_id, Some(18_576)),
+            (
+                user_id,
+                Some(18_576),
+                &lm_studio::agent_prompt(settings.web_access),
+            ),
         )
         .unwrap();
         server.join().unwrap();

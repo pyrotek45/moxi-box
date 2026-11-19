@@ -271,6 +271,8 @@ impl Store {
             summary,
             compacted_through,
             memory: self.memory()?,
+            goal: self.goal()?,
+            playbook: self.playbook()?,
             activity: steps,
         })
     }
@@ -308,6 +310,28 @@ impl Store {
             .execute(
                 "UPDATE conversations SET learned_context_bytes=?1 WHERE id=?2",
                 params![bytes, self.current.get()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    /// The workspace's long-running goal, set with /goal; empty when none.
+    pub fn goal(&self) -> Result<String, String> {
+        self.connection
+            .query_row(
+                "SELECT goal FROM conversations WHERE id=?1",
+                [self.current.get()],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
+    }
+    pub fn save_goal(&self, goal: &str) -> Result<(), String> {
+        if goal.len() > 2000 {
+            return Err("Keep the goal under 2,000 bytes.".to_owned());
+        }
+        self.connection
+            .execute(
+                "UPDATE conversations SET goal=?1 WHERE id=?2",
+                params![goal.trim(), self.current.get()],
             )
             .map_err(|e| e.to_string())?;
         Ok(())

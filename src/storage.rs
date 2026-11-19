@@ -11,7 +11,7 @@ use crate::domain::{
 
 const DATABASE_DIRECTORY: &str = "moxi-box";
 const DATABASE_FILENAME: &str = "moxi-box.sqlite";
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// A workspace is one conversation with its own memory and tasks, and an optional folder.
 pub struct Store {
@@ -107,6 +107,13 @@ impl Store {
                     )
                     .map_err(|e| e.to_string())?;
             }
+            if version < 6 {
+                self.connection
+                    .execute_batch(
+                        "ALTER TABLE conversations ADD COLUMN goal TEXT NOT NULL DEFAULT '';",
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
             self.connection.execute_batch("CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);").map_err(|e| e.to_string())?;
             self.connection
                 .execute("UPDATE schema_version SET version=?1", [SCHEMA_VERSION])
@@ -138,6 +145,67 @@ impl Store {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Lessons shared by every workspace, which the agent may extend with approval.
+    pub fn playbook(&self) -> Result<String, String> {
+        match self.connection.query_row(
+            "SELECT value FROM settings WHERE key = 'playbook'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn save_playbook(&self, content: &str) -> Result<(), String> {
+        if content.len() > 6000 {
+            return Err("Keep the shared playbook under 6,000 bytes.".to_owned());
+        }
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('playbook', ?1)",
+                [content.trim()],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// A portable copy of preferences and the shared playbook; no folders, chats, or memory.
+    pub fn export_settings(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut settings = self.settings()?;
+        settings.workspace_root.clear();
+        let document = serde_json::json!({
+            "moxi_box_settings": 1,
+            "settings": settings,
+            "playbook": self.playbook()?,
+        });
+        let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
+        fs::write(path, text)
+            .map_err(|error| format!("Could not write {}: {error}", path.display()))
+    }
+
+    /// Validate the whole file before changing anything; the attached folder is kept.
+    pub fn import_settings(&self, path: &std::path::Path) -> Result<Settings, String> {
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let document: serde_json::Value =
+            serde_json::from_str(&text).map_err(|error| format!("Not a settings file: {error}"))?;
+        if document["moxi_box_settings"] != 1 {
+            return Err("Not a Moxi Box settings file.".to_owned());
+        }
+        let mut settings: Settings = serde_json::from_value(document["settings"].clone())
+            .map_err(|error| format!("Invalid settings: {error}"))?;
+        let playbook = document["playbook"].as_str().unwrap_or_default();
+        if playbook.len() > 6000 {
+            return Err("The playbook in this file is over 6,000 bytes.".to_owned());
+        }
+        settings.workspace_root = self.settings()?.workspace_root;
+        self.save_settings(&settings)?;
+        self.save_playbook(playbook)?;
+        Ok(settings)
     }
 
     pub fn add_message(&self, role: MessageRole, content: &str) -> Result<i64, String> {
@@ -314,6 +382,40 @@ fn parse_role(role: &str) -> MessageRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_export_and_import_round_trip_without_folders() {
+        let path = std::env::temp_dir().join(format!("moxi-settings-{}.json", std::process::id()));
+        let store = Store::in_memory();
+        let settings = Settings {
+            selected_model: Some("qwen".into()),
+            web_access: true,
+            workspace_root: "/private/project".into(),
+            ..Settings::default()
+        };
+        store.save_settings(&settings).unwrap();
+        store.save_playbook("- Lesson: use .venv").unwrap();
+        store.export_settings(&path).unwrap();
+        assert!(!fs::read_to_string(&path)
+            .unwrap()
+            .contains("/private/project"));
+        let other = Store::in_memory();
+        other
+            .save_settings(&Settings {
+                workspace_root: "/kept".into(),
+                ..Settings::default()
+            })
+            .unwrap();
+        let imported = other.import_settings(&path).unwrap();
+        assert_eq!(imported.selected_model.as_deref(), Some("qwen"));
+        assert!(imported.web_access);
+        assert_eq!(imported.workspace_root, "/kept");
+        assert_eq!(other.playbook().unwrap(), "- Lesson: use .venv");
+        fs::write(&path, "{\"settings\":{}}").unwrap();
+        assert!(other.import_settings(&path).is_err());
+        assert_eq!(other.playbook().unwrap(), "- Lesson: use .venv");
+        let _ = fs::remove_file(path);
+    }
 
     #[test]
     fn legacy_folders_become_workspaces_and_state_survives_restart() {

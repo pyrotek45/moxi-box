@@ -134,13 +134,24 @@ pub fn file_row(ui: &mut egui::Ui, entry: &WorkspaceEntry, selected: bool, expan
     response.on_hover_text(&entry.path).clicked()
 }
 
-/// A compact checklist row; returns the new completion state when clicked.
-pub fn task_row(ui: &mut egui::Ui, task: &Task) -> Option<bool> {
+pub enum TaskAction {
+    /// The new completion state.
+    Toggle(bool),
+    Delete,
+}
+
+/// A compact checklist row; hovering reveals a painted remove button.
+pub fn task_row(ui: &mut egui::Ui, task: &Task) -> Option<TaskAction> {
     use crate::domain::TaskStatus;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+    let sense = if ui.is_enabled() {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), sense);
     let painter = ui.painter_at(rect);
-    if response.hovered() {
+    let hovered = response.hovered() && ui.is_enabled();
+    if hovered {
         painter.rect_filled(rect, 4.0, Color32::from_white_alpha(6));
     }
     let icon = egui::pos2(rect.left() + 10.0, rect.center().y);
@@ -164,16 +175,23 @@ pub fn task_row(ui: &mut egui::Ui, task: &Task) -> Option<bool> {
             painter.circle_stroke(icon, 5.5, egui::Stroke::new(1.3_f32, TEXT_MUTED));
         }
     }
+    let remove = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 12.0, rect.center().y),
+        egui::vec2(20.0, 20.0),
+    );
     let done = task.status == TaskStatus::Completed;
     let galley = ui.painter().layout_no_wrap(
         task.title.clone(),
         egui::FontId::proportional(13.0),
         if done { TEXT_MUTED } else { TEXT },
     );
-    let text_rect = egui::Rect::from_x_y_ranges(
-        (icon.x + 12.0)..=(rect.right() - 4.0).max(icon.x + 12.0),
-        rect.y_range(),
-    );
+    let right = if hovered {
+        remove.left() - 2.0
+    } else {
+        rect.right() - 4.0
+    };
+    let text_rect =
+        egui::Rect::from_x_y_ranges((icon.x + 12.0)..=right.max(icon.x + 12.0), rect.y_range());
     let text_pos = egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0);
     let width = galley.size().x.min(text_rect.width());
     painter
@@ -186,12 +204,190 @@ pub fn task_row(ui: &mut egui::Ui, task: &Task) -> Option<bool> {
             egui::Stroke::new(1.0_f32, TEXT_MUTED),
         );
     }
-    let response = response.on_hover_text(format!(
-        "{} · {}",
-        task.title,
-        task.status.as_str().replace('_', " ")
-    ));
-    response.clicked().then_some(!done)
+    let over_remove = hovered && response.hover_pos().is_some_and(|pos| remove.contains(pos));
+    if hovered {
+        close_mark(&painter, remove, over_remove);
+    }
+    let response = response.on_hover_text(if over_remove {
+        "Remove task".to_owned()
+    } else {
+        format!(
+            "{} · {}\nClick to mark {}",
+            task.title,
+            task.status.as_str().replace('_', " "),
+            if done { "not done" } else { "done" }
+        )
+    });
+    if !response.clicked() {
+        None
+    } else if over_remove {
+        Some(TaskAction::Delete)
+    } else {
+        Some(TaskAction::Toggle(!done))
+    }
+}
+
+/// A painted "x" used by hover-revealed remove buttons; red while the pointer is over it.
+fn close_mark(painter: &egui::Painter, rect: egui::Rect, hot: bool) {
+    if hot {
+        painter.rect_filled(rect, 4.0, Color32::from_rgb(90, 36, 36));
+    }
+    let stroke = egui::Stroke::new(
+        1.4_f32,
+        if hot {
+            Color32::from_rgb(252, 165, 165)
+        } else {
+            TEXT_MUTED
+        },
+    );
+    let c = rect.center();
+    painter.line_segment(
+        [c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)],
+        stroke,
+    );
+    painter.line_segment(
+        [c + egui::vec2(-3.5, 3.5), c + egui::vec2(3.5, -3.5)],
+        stroke,
+    );
+}
+
+/// A sidebar section heading with optional small text actions on the right; returns the
+/// index of the clicked action.
+pub fn section_header(ui: &mut egui::Ui, title: &str, actions: &[&str]) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).small().color(TEXT_MUTED));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            for (index, action) in actions.iter().enumerate().rev() {
+                if link_button(ui, action).clicked() {
+                    clicked = Some(index);
+                }
+            }
+        });
+    });
+    clicked
+}
+
+/// Quiet text button for secondary actions in dense areas.
+pub fn link_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).small().color(TEXT_MUTED))
+            .frame(false)
+            .min_size(egui::vec2(0.0, 20.0)),
+    )
+}
+
+/// A compact clickable row: label on the left, muted detail and a chevron on the right.
+pub fn nav_row(ui: &mut egui::Ui, label: &str, detail: &str) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 6.0, Color32::from_white_alpha(6));
+    }
+    painter.text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.5),
+        TEXT,
+    );
+    let chevron = egui::pos2(rect.right() - 10.0, rect.center().y);
+    painter.line(
+        vec![
+            chevron + egui::vec2(-2.0, -4.0),
+            chevron + egui::vec2(2.0, 0.0),
+            chevron + egui::vec2(-2.0, 4.0),
+        ],
+        egui::Stroke::new(1.4_f32, TEXT_MUTED),
+    );
+    painter.text(
+        egui::pos2(rect.right() - 22.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        detail,
+        egui::FontId::proportional(12.0),
+        TEXT_MUTED,
+    );
+    response
+}
+
+pub const REASONING_LEVELS: [&str; 4] = ["Off", "Low", "Medium", "High"];
+
+/// A compact selector for reasoning passes before acting; returns true when changed.
+pub fn reasoning_picker(ui: &mut egui::Ui, level: &mut u8) -> bool {
+    let before = *level;
+    let index = (*level).min(3) as usize;
+    egui::ComboBox::from_id_salt("reasoning_level")
+        .selected_text(if index == 0 {
+            "Reasoning off".to_owned()
+        } else {
+            format!("Reasoning: {}", REASONING_LEVELS[index])
+        })
+        .width(130.0)
+        .show_ui(ui, |ui| {
+            for (value, label) in REASONING_LEVELS.iter().enumerate() {
+                ui.selectable_value(level, value as u8, *label);
+            }
+        })
+        .response
+        .on_hover_text("Have the model think for 1-3 turns (Low/Medium/High) before it acts. Slower; off by default.");
+    *level != before
+}
+
+/// A painted folder icon button.
+pub fn folder_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 6.0, SURFACE_RAISED);
+    }
+    let color = if ui.is_enabled() { TEXT } else { TEXT_MUTED };
+    let stroke = egui::Stroke::new(1.4_f32, color);
+    let body =
+        egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(14.0, 10.0));
+    painter.rect_stroke(body, 2.0, stroke, egui::StrokeKind::Inside);
+    painter.line(
+        vec![
+            body.left_top() + egui::vec2(0.5, 0.5),
+            body.left_top() + egui::vec2(0.5, -2.5),
+            body.left_top() + egui::vec2(5.0, -2.5),
+            body.left_top() + egui::vec2(6.5, 0.5),
+        ],
+        stroke,
+    );
+    response
+}
+
+/// A row of equal tabs; returns true when the selection changed.
+pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize, labels: &[&str]) -> bool {
+    let before = *selected;
+    let spacing = 4.0;
+    let width = ((ui.available_width() - spacing * (labels.len() as f32 - 1.0))
+        / labels.len() as f32)
+        .max(40.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = spacing;
+        for (index, label) in labels.iter().enumerate() {
+            let active = *selected == index;
+            let button = egui::Button::new(RichText::new(*label).strong().color(if active {
+                Color32::WHITE
+            } else {
+                TEXT_MUTED
+            }))
+            .fill(if active {
+                SURFACE
+            } else {
+                Color32::TRANSPARENT
+            })
+            .corner_radius(8.0)
+            .stroke(egui::Stroke::NONE)
+            .min_size(egui::vec2(width, 30.0));
+            if ui.add(button).clicked() {
+                *selected = index;
+            }
+        }
+    });
+    *selected != before
 }
 
 pub fn status_badge(ui: &mut egui::Ui, status: ProviderStatus) {
@@ -316,26 +512,7 @@ pub fn workspace_row(
     let pointer = response.hover_pos();
     let over_delete = show_delete && pointer.is_some_and(|pos| delete.contains(pos));
     if show_delete {
-        if over_delete {
-            painter.rect_filled(delete, 4.0, Color32::from_rgb(90, 36, 36));
-        }
-        let stroke = egui::Stroke::new(
-            1.4_f32,
-            if over_delete {
-                Color32::from_rgb(252, 165, 165)
-            } else {
-                TEXT_MUTED
-            },
-        );
-        let c = delete.center();
-        painter.line_segment(
-            [c + egui::vec2(-3.5, -3.5), c + egui::vec2(3.5, 3.5)],
-            stroke,
-        );
-        painter.line_segment(
-            [c + egui::vec2(-3.5, 3.5), c + egui::vec2(3.5, -3.5)],
-            stroke,
-        );
+        close_mark(&painter, delete, over_delete);
     }
     let hover = if workspace.folder.is_empty() {
         format!("{} · no folder", workspace.name)
@@ -713,8 +890,9 @@ pub fn composer(
                 });
             }
             // Ctrl+Enter also works when focus has moved off the input to nothing else, e.g. after clicking Send.
-            let shortcut = ui
-                .memory(|memory| memory.has_focus(input_id) || memory.focused().is_none())
+            // A disabled composer (behind a dialog) leaves Ctrl+Enter for the dialog.
+            let shortcut = ui.is_enabled()
+                && ui.memory(|memory| memory.has_focus(input_id) || memory.focused().is_none())
                 && ui.input_mut(|input| {
                     input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter)
                         || input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
@@ -731,9 +909,9 @@ pub fn composer(
                             .desired_rows(2)
                             .frame(false)
                             .hint_text(if agent_mode {
-                                "Describe a coding task…"
+                                "Describe a coding task…  (/help for commands)"
                             } else {
-                                "Message your local model…"
+                                "Message your local model…  (/help for commands)"
                             }),
                     )
                 })

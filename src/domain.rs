@@ -20,6 +20,9 @@ pub struct Settings {
     /// Lets the agent search the web and read pages. Off by default.
     #[serde(default)]
     pub web_access: bool,
+    /// Reasoning passes before acting: 0 off (default), 1 low, 2 medium, 3 high.
+    #[serde(default)]
+    pub reasoning: u8,
 }
 
 impl Default for Settings {
@@ -32,6 +35,7 @@ impl Default for Settings {
             selected_model: None,
             workspace_root: default_workspace_root(),
             web_access: false,
+            reasoning: 0,
         }
     }
 }
@@ -146,6 +150,8 @@ pub struct ConversationState {
     pub summary: String,
     pub compacted_through: i64,
     pub memory: String,
+    pub goal: String,
+    pub playbook: String,
     pub activity: Vec<AgentActivity>,
 }
 
@@ -161,6 +167,11 @@ pub enum AppCommand {
     SelectWorkspace(i64),
     DeleteWorkspace(i64),
     SaveMemory(String),
+    SavePlaybook(String),
+    ExportSettings(std::path::PathBuf),
+    ImportSettings(std::path::PathBuf),
+    /// Set the workspace goal; empty clears it.
+    SetGoal(String),
     SaveSettings(Settings),
     RefreshModels {
         request_id: u64,
@@ -186,6 +197,11 @@ pub enum AppCommand {
     SetTaskComplete {
         id: i64,
         complete: bool,
+    },
+    DeleteTask(i64),
+    /// Remove finished tasks, or every task when `completed_only` is false.
+    ClearTasks {
+        completed_only: bool,
     },
     SendChat {
         settings: Settings,
@@ -219,7 +235,17 @@ pub enum AppEvent {
         summary: String,
         through: i64,
     },
-    WorkspaceLoaded(Vec<WorkspaceEntry>),
+    /// A fresh scan of `root`; results for a folder that is no longer attached are ignored.
+    WorkspaceLoaded {
+        root: String,
+        entries: Vec<WorkspaceEntry>,
+    },
+    /// Workspace memory and shared playbook after the agent saved a note.
+    MemoryUpdated {
+        memory: String,
+        playbook: String,
+    },
+    SettingsImported(Settings),
     PreviewLoaded {
         path: String,
         content: String,
@@ -242,13 +268,10 @@ pub enum AppEvent {
         request_id: String,
         summary: String,
         preview: String,
+        /// Needs a person even with Auto-approve on (a command that may leave the workspace).
+        forced: bool,
     },
     TasksUpdated(Vec<Task>),
-    TaskAdded(Task),
-    TaskChanged {
-        id: i64,
-        complete: bool,
-    },
     Notice(String),
     Error(String),
     RunFailed(String),

@@ -4,16 +4,16 @@ A small native Rust + egui harness for local models: chat, workspace tools, expl
 
 ## Getting started
 
-1. Each sidebar entry is a **workspace**: one conversation with its own memory and tasks. Click **+** for a fresh one. To let the agent work on files, **Attach** a folder (or create one with **New folder**). Folders are optional.
+1. Each sidebar entry is a **workspace**: one conversation with its own memory, goal, and tasks. Click **+** for a fresh one. To let the agent work on files, click the folder icon beside **+** (or **Add folder** in the sidebar) to attach one. Folders are optional.
 2. Click the provider name in the header. Choose **LM Studio**, **Ollama**, or **Custom OpenAI-compatible**. Set its base URL and optionally an exact model ID, then Save. Both `http://127.0.0.1:1234` and `http://127.0.0.1:1234/v1` work.
 3. Start the provider's OpenAI-compatible server and load a model. **Refresh** only discovers model IDs; **Available** means discovery worked. Click **Connect** to enable sending. **Disconnect** explicitly disables sending. Changing providers disconnects the previous one.
-4. Choose **Chat** for conversation, or **Agent** to let the model use tools. Enter a request and click Send or press Ctrl/Cmd+Enter. Plain Enter inserts a newline. Up/Down recall sent prompts when the input is single-line or already browsing history; Down past the newest entry restores the unsent draft. Multiline editing keeps normal arrow navigation.
+4. Choose **Chat** for conversation (it can also manage the task list and, with Web access on, search the web), or **Agent** to let the model use every tool. **Reasoning** (off by default) makes the model think for one to three turns before it acts. Enter a request and click Send or press Ctrl/Cmd+Enter. Plain Enter inserts a newline. Up/Down recall sent prompts when the input is single-line or already browsing history; Down past the newest entry restores the unsent draft. Multiline editing keeps normal arrow navigation.
 
 A server running on your laptop is not automatically reachable from a cloud machine. Configure an endpoint reachable from where Moxi runs. Presets use local OpenAI-compatible APIs; native Anthropic/Gemini APIs and authenticated cloud-provider configuration are not implemented.
 
 ## Using the toolbelt
 
-The cog in the header opens **Settings**: Auto-approve, provider and context budget, a tool guide, and the data folder. Use a model with tool-calling support. Describe the result you want; you do not need to write tool-call JSON.
+The cog in the header opens **Settings**, organized in tabs: **Workspace** (folder and memory), **Agent** (Auto-approve, Web access), **General** (provider, settings export/import, data folder), and **Help** (tools and commands). Use a model with tool-calling support. Describe the result you want; you do not need to write tool-call JSON.
 
 Example: “Find where settings are loaded, explain it, then add validation and run the tests.”
 
@@ -25,13 +25,13 @@ Example: “Find where settings are loaded, explain it, then add validation and 
 | `edit_file` | Replaces one exact passage in an existing file, or every literal match when `replace_all` is explicitly set; shown as a diff. | Required |
 | `write_file` | Creates a file (with parent folders) or replaces a whole file. | Required |
 | `run_command` | Runs one shell command from the workspace root, including builds, tests, Git, and `python3` scripts. | Required |
-| `remember` | Appends a concise project fact to workspace memory. | Required |
+| `remember` | Appends a concise fact to workspace memory, or with `scope: "all"` a lesson to the shared playbook used by every workspace. | Required |
 | `web_search` | Searches the web (DuckDuckGo) and returns titles, URLs, and snippets. Only when **Web access** is on. | Automatic |
 | `fetch_url` | Reads an http(s) page as plain text, capped in length. Only when **Web access** is on. | Automatic |
 
 Tool steps appear live in the reply, in order, with plain titles such as "Read src/main.rs" or "Edited src/app.rs". Expand a step to see its result; edits show a red/green diff. Approve runs an operation once; Deny stops the run. **Auto-approve** (Agent mode header or Settings) runs edits, writes, commands, and memory notes without asking for the rest of the session. Send while Moxi works to queue a message: the agent reads it after its current tool round. **Stop** cancels a model request, summary request, approval wait, or command without an application-imposed elapsed-time deadline. Stopping cannot undo completed writes or commands, and a remote server may continue computing after its client connection closes.
 
-File tools reject traversal and symlink escapes. Paths normally look like `essays/file.md`; leading-slash forms such as `/essays/file.md` and a redundant workspace name such as `/my-project/essays/file.md` are accepted as workspace-root shorthand and never grant OS-root access. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Command output and model-facing tool observations are capped to keep memory and context bounded. Agent runs stop after sixteen model/tool rounds; send a follow-up to continue.
+File tools reject traversal and symlink escapes. Paths normally look like `essays/file.md`; leading-slash forms such as `/essays/file.md` and a redundant workspace name such as `/my-project/essays/file.md` are accepted as workspace-root shorthand and never grant OS-root access. Approved commands have the application's machine permissions: their working directory is **not an OS sandbox**. Commands that may reach outside the workspace (absolute paths elsewhere, `..` that climbs out, `~` or `$HOME`, `sudo`) always ask for approval with a warning, even when Auto-approve is on. This is a text check, not a sandbox. Command output and model-facing tool observations are capped to keep memory and context bounded; command output keeps its start and its end, where errors appear. There is no fixed turn limit: once the agent plans with `update_tasks`, it keeps working until every task is complete or it explains a blocker (two reminders per unchanged list). Repeating an identical tool call is warned after three rounds and stops the run after six; **Stop** always works.
 
 ## Workspaces, summaries, and memory
 
@@ -41,7 +41,11 @@ Every message is sent with the workspace's earlier messages, a bounded file/fold
 
 Context recovery has two modes in provider settings. **Auto** sends the full available history until the provider explicitly reports that context is too large, then summarizes older turns, records a conservative working limit for that workspace, and retries. **Manual** uses the token budget you set and compacts proactively before requests cross a conservative estimate, which can be steadier for models that report context limits inconsistently. If summarization fails, the run stops with an error and the transcript stays intact. Expand **Saved conversation summary** and enable **Show earlier messages** to inspect older turns.
 
-**Memory** holds editable notes for the current workspace. The agent can propose a `remember` note for approval, or you can write notes yourself. Do not store secrets.
+**Memory** (sidebar) holds editable notes for the current workspace and a **shared playbook** for all workspaces. The agent can propose a `remember` note for approval, for example a lesson about how it solved a problem, so later runs improve; you can add, remove, or edit notes yourself, and choose which notes are used everywhere: **Share** moves a workspace note to the playbook, **Unshare** moves it back. A `remember` call with `scope: "all"` is labelled as shared in its approval prompt. Do not store secrets. **Goal** holds a long-running objective that is added to every request.
+
+### Commands
+
+Type these in the composer: `/goal <text>` (set a goal and start working on it), `/goal` (view or edit), `/goal clear`, `/task <title>`, `/tasks clear`, `/tasks clear done`, `/remember <note>`, `/memory`, `/agent`, `/chat`, `/new [name]`, `/stop`, and `/help`. Text such as `/src/main.rs is broken` is sent as a normal message.
 
 ## Folder actions
 
@@ -75,20 +79,20 @@ Inter is licensed under the SIL Open Font License; see `assets/fonts/OFL.txt`.
 
 In **Agent** mode, ask “Plan this work, implement it, verify it, and keep the task list updated.” The agent can use `list_tasks` to resume the saved workspace plan and `update_tasks` to create or update it. A single call replaces the complete list, so it can mark several tasks completed together while retaining unfinished items. Each item has `title` and `status` (`pending`, `in_progress`, or `completed`). The agent should verify results before marking completion; a completed status is the agent’s report, not an independent test result.
 
-Task metadata updates need no approval. File changes, commands, and memory still require approval. Lists persist per workspace across restarts and conversations. You can also add tasks or toggle completion yourself in the sidebar. An empty task list intentionally clears the plan.
+Task metadata updates need no approval. File changes, commands, and memory still require approval. Lists persist per workspace across restarts and conversations. You can also add tasks, toggle completion, remove one (hover it and click ×), or clear done/all tasks in the sidebar, even while the agent runs; it picks up your edits before its next step. An empty task list intentionally clears the plan.
 
 Queued messages wait until the current tool sequence has finished, giving the agent a chance to recover from failed edits before starting the next request. Stop still cancels immediately. `edit_file` changes one unique match by default; its `replace_all=true` option changes every literal match for mechanical replacements such as an identifier rename. Missing matches leave the file unchanged. `update_tasks` replaces the whole list, so the agent must include existing tasks it wants to retain; it does not append.
 
 Chat bubbles render CommonMark formatting, including headings, emphasis, lists, links, quotes, tables, and fenced code with a copy button. Wide content scrolls horizontally within the bubble. Automatic image loading is disabled.
 
-Use the top-right Settings gear for folder attachment, creation, detachment, reset, and workspace memory. The sidebar retains workspace navigation, files, and tasks.
+The sidebar shows workspaces, the attached folder's file tree (rescanned every second and immediately after agent edits), tasks, and compact Memory and Goal buttons. Settings holds folder creation, detachment, and reset.
 
 The agent can call `delete_path` to permanently remove a file or folder under the attached root. Nonempty folders require `recursive: true`. Deletion requires approval unless Auto-approve is enabled; it rejects the workspace root, path escapes, and symlink aliases.
 
 Command execution is non-interactive: stdin is closed, and args must be an array of strings. Use unattended flags for build/install commands when appropriate. Commands retain explicit Stop support with no execution deadline. File writes and edits are limited to 256 KiB so the harness can read back and verify what it writes; oversized changes leave existing files untouched. Provider HTTP connections are reused across requests.
-Failed-tool recovery: if the model ends a turn while a tool type has failed without a later successful call, Moxi supplies up to two correction prompts per user request before taking queued work. Recovery stays within the run turn limit, never replays tools automatically, and preserves approvals and cancellation. The model is told to inspect partial command effects before retrying and explain unrecoverable blockers. This improves the opportunity to recover; it does not guarantee model success.
+Failed-tool recovery: if the model ends a turn while a tool type has failed without a later successful call, Moxi supplies up to two correction prompts per user request before taking queued work. Recovery never replays tools automatically, and preserves approvals and cancellation. The model is told to inspect partial command effects before retrying and explain unrecoverable blockers. This improves the opportunity to recover; it does not guarantee model success.
 If a file operation or command is still failed, Moxi blocks `remember` from recording that operation as a durable success. The agent must resolve and verify the action or report the blocker first.
-Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 500 tree entries and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
+Agent discovery tools: `grep` accepts a Rust regular expression, optional `include` glob, and `ignore_case`; `glob` finds matching relative filenames. Both scan at most 2,000 tree entries (300 per folder) and return at most 50 results, skipping generated directories and symlinks. Grep skips files larger than 256 KiB and reports numbered matching lines. These are read-only tools.
 
 File editing accepts the canonical `path`/`old_text`/`new_text` fields plus `filePath`/`oldString`/`newString` aliases. `old_text` is a safety anchor copied from the current file: it prevents a stale or guessed edit from silently changing the wrong code. Conflicting aliases are rejected. Copied numbered-line prefixes and CRLF/LF differences are handled automatically. If no match exists, no write occurs and the result tells the model to reread instead of repeating the failed call. For a complex transformation, the agent can use `run_command` with `python3` and then inspect or test the result.
 

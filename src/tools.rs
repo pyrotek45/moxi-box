@@ -11,7 +11,9 @@ use crate::domain::{Settings, WorkspaceEntry};
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_LISTED_FILES: usize = 300;
-const MAX_TREE_ENTRIES: usize = 500;
+const MAX_TREE_ENTRIES: usize = 2000;
+/// Per-folder cap so one huge folder cannot starve its siblings' contents.
+const MAX_FOLDER_ENTRIES: usize = 300;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 
 pub fn definitions() -> Vec<Value> {
@@ -21,10 +23,10 @@ pub fn definitions() -> Vec<Value> {
         definition("delete_path", "Permanently delete a workspace file or folder. Requires approval. Nonempty directories require recursive=true. Never deletes the workspace root or follows a symlink target. Inspect before deleting.", json!({"type":"object","properties":{"path":{"type":"string","description":"Path inside the workspace. Prefer essays/file.md; /essays/file.md is also accepted as workspace-root shorthand."},"recursive":{"type":"boolean","default":false}},"required":["path"]})),
         definition("list_tasks", "Read the saved workspace task list. Use at the start of multi-step work and when resuming.", json!({"type":"object","properties":{}})),
         definition("update_tasks", "Replace the whole task list. Send every task to keep. One call may update or complete many tasks. Example: {\"tasks\":[{\"title\":\"Inspect code\",\"status\":\"in_progress\"}]}", json!({"type":"object","properties":{"tasks":{"type":"array","description":"Complete replacement task list","items":{"type":"object","properties":{"title":{"type":"string","description":"Short task description"},"status":{"type":"string","description":"Current task state","enum":["pending","in_progress","completed"]}},"required":["title","status"]}}},"required":["tasks"]})),
-        definition("remember", "Save a concise durable project fact to workspace memory. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"}},"required":["note"]})),
+        definition("remember", "Save a concise durable note. scope \"workspace\" (default) keeps a fact about this project; scope \"all\" adds a general lesson to the shared playbook used in every workspace, such as how you solved a tricky problem. Requires approval. Never store secrets.", json!({"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["workspace","all"],"description":"workspace (default) or all"}},"required":["note"]})),
         definition(
             "list_files",
-            "List files and folders recursively (folders end with /), skipping .git, target, and node_modules. Optional path lists a subfolder.",
+            "List files and folders recursively (folders end with /), skipping .git and not descending into target, node_modules, .venv, venv, or caches. Optional path lists a subfolder.",
             json!({"type":"object","properties":{"path":{"type":"string","description":"Folder inside the workspace; omit for the root. Prefer essays; /essays is also accepted as workspace-root shorthand."}}}),
         ),
         definition(
@@ -53,6 +55,15 @@ pub fn definitions() -> Vec<Value> {
             json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to run, for example cargo test or python3 script.py"}},"required":["command"]}),
         ),
     ]
+}
+
+/// Whether a remember call targets the shared playbook; unknown scopes are rejected.
+pub fn remember_shared(arguments: &Value) -> Result<bool, String> {
+    match optional_string(arguments, "scope", &[])? {
+        None | Some("workspace") | Some("") => Ok(false),
+        Some("all") | Some("global") | Some("shared") => Ok(true),
+        Some(other) => Err(format!("Unknown scope {other}. Use workspace or all.")),
+    }
 }
 
 pub fn requires_approval(name: &str) -> bool {
@@ -120,6 +131,9 @@ pub fn call_preview(name: &str, arguments: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         "run_command" => format!("$ {}", command_line(arguments)),
+        "remember" if remember_shared(arguments) == Ok(true) => {
+            format!("Shared playbook (all workspaces): {}", text("note"))
+        }
         "remember" => text("note").to_owned(),
         _ => String::new(),
     }
@@ -173,6 +187,83 @@ fn command_line(arguments: &Value) -> String {
     )
     .trim()
     .to_owned()
+}
+
+/// Reasons a shell command may reach outside the workspace folder. This is a conservative text
+/// check, not a sandbox: any hit forces a manual approval even when Auto-approve is on.
+pub fn command_escapes(root: &str, arguments: &Value) -> Vec<String> {
+    let mut command = arguments["command"].as_str().unwrap_or_default().to_owned();
+    if let Some(program) = arguments["program"].as_str() {
+        command = format!("{program} {command}");
+        for argument in arguments["args"].as_array().into_iter().flatten() {
+            command.push(' ');
+            command.push_str(argument.as_str().unwrap_or_default());
+        }
+    }
+    let root = fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+    let mut reasons = Vec::new();
+    let mut add = |reason: String| {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    };
+    if command.contains("$HOME") || command.contains("${HOME}") {
+        add("refers to your home folder ($HOME)".to_owned());
+    }
+    let separators = |c: char| c.is_whitespace() || ";|&()<>'\"`".contains(c);
+    for token in command.split(separators).filter(|token| !token.is_empty()) {
+        if matches!(
+            token,
+            "sudo" | "su" | "doas" | "pkexec" | "chroot" | "mount"
+        ) {
+            add(format!("uses {token} to change privileges"));
+            continue;
+        }
+        // Check both the token and an option value such as --prefix=/usr/local.
+        for part in [Some(token), token.split_once('=').map(|(_, value)| value)]
+            .into_iter()
+            .flatten()
+        {
+            if part.starts_with('~') {
+                add(format!("refers to your home folder ({part})"));
+            } else if part.starts_with('/') {
+                let allowed = matches!(
+                    part,
+                    "/dev/null" | "/dev/stdout" | "/dev/stderr" | "/dev/zero" | "/dev/urandom"
+                );
+                if !allowed && !lexical_join(&root, part).starts_with(&root) {
+                    add(format!("uses a path outside the workspace: {part}"));
+                }
+            } else if part.split(['/', '\\']).any(|piece| piece == "..")
+                && !lexical_join(&root, part).starts_with(&root)
+            {
+                add(format!("climbs out of the workspace: {part}"));
+            }
+        }
+    }
+    reasons
+}
+
+/// Join without touching the file system, resolving "." and ".." textually.
+fn lexical_join(root: &Path, path: &str) -> PathBuf {
+    let mut joined = if Path::new(path).is_absolute() {
+        PathBuf::from("/")
+    } else {
+        root.to_path_buf()
+    };
+    for component in Path::new(path).components() {
+        match component {
+            Component::ParentDir => {
+                joined.pop();
+            }
+            Component::Normal(part) => joined.push(part),
+            Component::RootDir | Component::Prefix(_) => {
+                joined = PathBuf::from(component.as_os_str())
+            }
+            Component::CurDir => {}
+        }
+    }
+    joined
 }
 
 pub fn approval_summary(name: &str, arguments: &Value) -> String {
@@ -322,9 +413,7 @@ fn command_arguments(arguments: &Value) -> Result<Option<&Vec<Value>>, String> {
 
 pub fn workspace_entries(root: &str) -> Result<Vec<WorkspaceEntry>, String> {
     let root = canonical_root(root)?;
-    let mut entries = Vec::new();
-    collect_entries(&root, &root, 0, &mut entries)?;
-    Ok(entries)
+    collect_entries(&root, &root)
 }
 
 pub fn preview(root: &str, path: &str) -> Result<String, String> {
@@ -442,8 +531,7 @@ fn list_files(root: &Path, path: &str) -> Result<String, String> {
     if !directory.is_dir() {
         return Err(format!("{path} is not a folder."));
     }
-    let mut entries = Vec::new();
-    collect_entries(root, &directory, 0, &mut entries)?;
+    let entries = collect_entries(root, &directory)?;
     if entries.is_empty() {
         return Ok("(empty folder)".to_owned());
     }
@@ -464,49 +552,74 @@ fn list_files(root: &Path, path: &str) -> Result<String, String> {
     }
     Ok(listing)
 }
-fn collect_entries(
-    root: &Path,
-    directory: &Path,
-    depth: usize,
-    entries: &mut Vec<WorkspaceEntry>,
-) -> Result<(), String> {
-    let mut children = fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    children.sort_by_key(|entry| (!entry.path().is_dir(), entry.file_name()));
-    for child in children {
-        if entries.len() >= MAX_TREE_ENTRIES {
-            break;
-        }
-        if child
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_symlink()
-        {
-            continue;
-        }
-        let path = child.path();
-        let name = child.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), ".git" | "target" | "node_modules") {
-            continue;
-        }
-        let is_directory = path.is_dir();
-        entries.push(WorkspaceEntry {
-            path: path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string(),
-            name,
-            depth,
-            is_directory,
-        });
-        if is_directory {
-            collect_entries(root, &path, depth + 1, entries)?;
+/// Generated or vendored folders are listed but not scanned, so they cannot crowd out project
+/// files; their contents stay reachable by explicit path (for example .venv/bin/python).
+fn is_unscanned_folder(name: &str) -> bool {
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+    )
+}
+
+/// Scan breadth-first so a huge subfolder cannot hide later siblings or shallow files, then
+/// return depth-first order (folders first, by name) for the tree. Unreadable or vanished
+/// subfolders are skipped instead of failing the whole scan; only the start folder must be readable.
+fn collect_entries(root: &Path, directory: &Path) -> Result<Vec<WorkspaceEntry>, String> {
+    let mut found: Vec<(Vec<(bool, String)>, WorkspaceEntry)> = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(directory.to_path_buf(), Vec::new())]);
+    let mut first = true;
+    while let Some((folder, key)) = queue.pop_front() {
+        let listing = match fs::read_dir(&folder) {
+            Ok(listing) => listing,
+            Err(error) if first => return Err(error.to_string()),
+            Err(_) => continue,
+        };
+        first = false;
+        let mut children = listing
+            .filter_map(Result::ok)
+            .filter_map(|child| {
+                let kind = child.file_type().ok()?;
+                let name = child.file_name().to_string_lossy().to_string();
+                (!kind.is_symlink() && name != ".git").then_some((
+                    kind.is_dir(),
+                    name,
+                    child.path(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        children.sort_by(|a, b| (!a.0, &a.1).cmp(&(!b.0, &b.1)));
+        for (is_directory, name, path) in children.into_iter().take(MAX_FOLDER_ENTRIES) {
+            if found.len() >= MAX_TREE_ENTRIES {
+                break;
+            }
+            let mut child_key = key.clone();
+            child_key.push((!is_directory, name.clone()));
+            found.push((
+                child_key.clone(),
+                WorkspaceEntry {
+                    path: path
+                        .strip_prefix(root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string(),
+                    name,
+                    depth: key.len(),
+                    is_directory,
+                },
+            ));
+            if is_directory && !is_unscanned_folder(&found.last().unwrap().1.name) {
+                queue.push_back((path, child_key));
+            }
         }
     }
-    Ok(())
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found.into_iter().map(|(_, entry)| entry).collect())
 }
 fn read_file(root: &Path, path: &str) -> Result<String, String> {
     let path = safe_path(root, path, false)?;
@@ -1111,9 +1224,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    struct Fixture(PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf);
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
                 "moxi-tools-{}-{}",
                 std::process::id(),
@@ -1149,7 +1262,7 @@ mod tests {
         fs::create_dir_all(fixture.0.join("target/debug")).unwrap();
         assert_eq!(
             list_files(&fixture.0, "").unwrap(),
-            "src/\nsrc/main.rs\nREADME.md"
+            "src/\nsrc/main.rs\ntarget/\nREADME.md"
         );
         assert_eq!(list_files(&fixture.0, "src").unwrap(), "src/main.rs");
         assert_eq!(list_files(&fixture.0, "/src").unwrap(), "src/main.rs");
@@ -1573,6 +1686,7 @@ mod discovery_edit_tests {
 
 #[cfg(test)]
 mod edit_match_tests {
+    use super::tests::Fixture;
     use super::*;
     #[test]
     fn edit_modes_handle_numbered_crlf_and_preserve_endings() {
@@ -1649,5 +1763,66 @@ mod edit_match_tests {
             &["replaceAll"]
         )
         .is_err());
+    }
+
+    #[test]
+    fn commands_that_reach_outside_the_workspace_are_flagged() {
+        let fixture = Fixture::new();
+        let root = fixture.0.to_str().unwrap();
+        let check = |command: &str| command_escapes(root, &json!({ "command": command }));
+        assert!(check("python3 -m venv .venv && .venv/bin/python -m pytest").is_empty());
+        assert!(check("ls src/../tests > /dev/null 2>&1").is_empty());
+        assert!(check(&format!("cat {root}/README.md")).is_empty());
+        assert!(check("curl https://example.com/a/b").is_empty());
+        assert!(!check("cat /etc/passwd").is_empty());
+        assert!(!check("cd .. && rm -rf project").is_empty());
+        assert!(!check("cp a ../../outside").is_empty());
+        assert!(!check("rm -rf ~/Documents").is_empty());
+        assert!(!check("echo $HOME").is_empty());
+        assert!(!check("sudo apt install x").is_empty());
+        assert!(!check("pip install --target=/usr/lib/x y").is_empty());
+        assert!(!check("cat \"/etc/hosts\"").is_empty());
+        assert!(!command_escapes(root, &json!({"program":"rm","args":["-rf","/"]})).is_empty());
+    }
+
+    #[test]
+    fn tree_shows_every_shallow_entry_and_survives_bad_subfolders() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.0.join("a_big")).unwrap();
+        for index in 0..(MAX_FOLDER_ENTRIES + 50) {
+            fs::write(fixture.0.join(format!("a_big/f{index}")), "").unwrap();
+        }
+        fs::create_dir_all(fixture.0.join("src/nested")).unwrap();
+        fs::write(fixture.0.join("src/nested/lib.rs"), "").unwrap();
+        fs::write(fixture.0.join("z_late.txt"), "").unwrap();
+        let entries = workspace_entries(fixture.0.to_str().unwrap()).unwrap();
+        let paths = entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>();
+        // Depth-first order with folders first, and the big folder cannot hide later siblings.
+        assert_eq!(paths[0], "a_big");
+        assert!(paths.contains(&"z_late.txt"));
+        let src = paths.iter().position(|p| *p == "src").unwrap();
+        assert_eq!(paths[src + 1], "src/nested");
+        assert_eq!(paths[src + 2], "src/nested/lib.rs");
+        assert_eq!(*paths.last().unwrap(), "z_late.txt");
+        assert_eq!(entries[src + 2].depth, 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::remove_dir_all(fixture.0.join("a_big")).unwrap();
+            fs::create_dir_all(fixture.0.join("locked/inner")).unwrap();
+            fs::set_permissions(fixture.0.join("locked"), fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let entries = workspace_entries(fixture.0.to_str().unwrap());
+            fs::set_permissions(fixture.0.join("locked"), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let paths = entries
+                .unwrap()
+                .into_iter()
+                .map(|e| e.path)
+                .collect::<Vec<_>>();
+            assert!(
+                paths.contains(&"locked".to_owned()) && paths.contains(&"z_late.txt".to_owned())
+            );
+        }
     }
 }

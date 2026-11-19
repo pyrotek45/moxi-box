@@ -35,6 +35,7 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             history: PromptHistory::default(),
             approval: None,
             auto_approve: Arc::new(AtomicBool::new(false)),
+            approval_forced: false,
             activity: vec![],
             workspaces: vec![],
             workspace_id: None,
@@ -44,9 +45,18 @@ fn fixture_with_commands() -> ((MoxiBoxApp, Sender<AppEvent>), Receiver<AppComma
             show_full_history: false,
             memory: String::new(),
             memory_draft: None,
+            goal: String::new(),
+            goal_draft: None,
+            playbook: String::new(),
+            playbook_draft: String::new(),
+            memory_tab: 0,
+            file_dialog: None,
+            memory_note: String::new(),
+            settings_tab: 0,
             workspace_entries: vec![],
             expanded_folders: Default::default(),
             preview: None,
+            preview_requested: None,
             run_pending: false,
             show_workspace: true,
             worker_lost: false,
@@ -151,6 +161,8 @@ fn switching_workspaces_follows_the_loaded_folder() {
             summary: String::new(),
             compacted_through: 0,
             memory: String::new(),
+            goal: String::new(),
+            playbook: String::new(),
             activity: vec![],
         },
     ))
@@ -266,7 +278,7 @@ fn modal_actions_remain_inside_compact_windows() {
             }
             3 => {
                 app.memory_draft = Some(String::new());
-                "Save memory"
+                "Save"
             }
             _ => {
                 app.show_settings = true;
@@ -391,6 +403,11 @@ fn turning_on_auto_approve_approves_the_waiting_request() {
         commands.try_recv(),
         Ok(AppCommand::ResolveApproval { request_id, approved: true }) if request_id == "call-1"
     ));
+    app.set_auto_approve(false);
+    app.approval = Some(("call-2".into(), "Warning".into(), "$ cat /etc/x".into()));
+    app.approval_forced = true;
+    app.set_auto_approve(true);
+    assert!(app.approval.is_some() && commands.try_recv().is_err());
 }
 
 #[test]

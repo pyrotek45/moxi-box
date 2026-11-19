@@ -35,6 +35,8 @@ pub(super) struct AgentRequest {
     settings: Settings,
     content: String,
     auto_approve: std::sync::Arc<AtomicBool>,
+    /// Chat mode: the same loop with only task and web tools, and no task stop gate.
+    chat: bool,
 }
 
 pub fn start(
@@ -54,9 +56,7 @@ pub fn start(
                     Ok(content) => AppEvent::PreviewLoaded { path, content },
                     Err(error) => AppEvent::Notice(error),
                 },
-                AppCommand::BrowseWorkspace { root } => {
-                    AppEvent::WorkspaceLoaded(tools::workspace_entries(&root).unwrap_or_default())
-                }
+                AppCommand::BrowseWorkspace { root } => browse(root),
                 command => {
                     if backend_sender.send(command).is_err() {
                         break;
@@ -182,6 +182,25 @@ fn handle(
         AppCommand::SelectWorkspace(id) => sync_after(store, events, store.select(id)),
         AppCommand::DeleteWorkspace(id) => sync_after(store, events, store.delete_workspace(id)),
         AppCommand::SaveMemory(content) => sync_after(store, events, store.save_memory(&content)),
+        AppCommand::SavePlaybook(content) => {
+            sync_after(store, events, store.save_playbook(&content))
+        }
+        AppCommand::ExportSettings(path) => match store.export_settings(&path) {
+            Ok(()) => send(
+                events,
+                AppEvent::Notice(format!("Settings exported to {}", path.display())),
+            ),
+            Err(error) => fail(events, error),
+        },
+        AppCommand::ImportSettings(path) => match store.import_settings(&path) {
+            Ok(settings) => {
+                send(events, AppEvent::SettingsImported(settings));
+                send(events, AppEvent::Notice("Settings imported.".to_owned()));
+                sync_conversation(store, events);
+            }
+            Err(error) => fail(events, error),
+        },
+        AppCommand::SetGoal(goal) => sync_after(store, events, store.save_goal(&goal)),
         AppCommand::ResetWorkspace { path } => {
             let result = tools::reset_workspace(&path).and_then(|backup| {
                 store.add_message(
@@ -215,28 +234,15 @@ fn handle(
                 sync_conversation(store, events);
             }
         }
-        // Periodic and quiet: a folder that vanished shows as empty rather than spamming notices.
-        AppCommand::BrowseWorkspace { root } => send(
-            events,
-            AppEvent::WorkspaceLoaded(tools::workspace_entries(&root).unwrap_or_default()),
-        ),
+        AppCommand::BrowseWorkspace { root } => send(events, browse(root)),
         AppCommand::ReadPreview { root, path } => match tools::preview(&root, &path) {
             Ok(content) => send(events, AppEvent::PreviewLoaded { path, content }),
             Err(error) => fail(events, error),
         },
-        AppCommand::AddTask(title) => {
-            if !title.trim().is_empty() {
-                match store.add_task(title.trim()) {
-                    Ok(task) => send(events, AppEvent::TaskAdded(task)),
-                    Err(error) => fail(events, error),
-                }
-            }
-        }
-        AppCommand::SetTaskComplete { id, complete } => match store.set_task_complete(id, complete)
-        {
-            Ok(()) => send(events, AppEvent::TaskChanged { id, complete }),
-            Err(error) => fail(events, error),
-        },
+        command @ (AppCommand::AddTask(_)
+        | AppCommand::SetTaskComplete { .. }
+        | AppCommand::DeleteTask(_)
+        | AppCommand::ClearTasks { .. }) => task_command(store, events, command),
         AppCommand::SendChat {
             mut settings,
             content,
@@ -253,27 +259,59 @@ fn handle(
                 Ok(folder) => settings.workspace_root = folder,
                 Err(error) => return fail(events, error),
             }
-            if agent_mode {
-                agent::run_agent(
-                    store,
-                    runtime,
-                    events,
-                    commands,
-                    deferred,
-                    AgentRequest {
-                        settings,
-                        content,
-                        auto_approve,
-                    },
-                    &cancelled,
-                )
-            } else {
-                send_chat(store, runtime, events, settings, content, &cancelled)
-            }
+            agent::run_agent(
+                store,
+                runtime,
+                events,
+                commands,
+                deferred,
+                AgentRequest {
+                    settings,
+                    content,
+                    auto_approve,
+                    chat: !agent_mode,
+                },
+                &cancelled,
+            )
         }
         // A late click after the run ended or was stopped has nothing left to resolve.
         AppCommand::ResolveApproval { .. } => {}
     }
+}
+
+/// Periodic and quiet: a folder that vanished shows as empty rather than spamming notices.
+fn browse(root: String) -> AppEvent {
+    let entries = tools::workspace_entries(&root).unwrap_or_default();
+    AppEvent::WorkspaceLoaded { root, entries }
+}
+
+/// Task edits from the sidebar; also applied between agent turns so the user can steer a run.
+fn task_command(store: &Store, events: &EventSender, command: AppCommand) {
+    let result = match command {
+        AppCommand::AddTask(title) if title.trim().is_empty() => return,
+        AppCommand::AddTask(title) => store.add_task(title.trim()).map(|_| ()),
+        AppCommand::SetTaskComplete { id, complete } => store.set_task_complete(id, complete),
+        AppCommand::DeleteTask(id) => store.delete_task(id),
+        AppCommand::ClearTasks { completed_only } => store.clear_tasks(completed_only),
+        _ => return,
+    };
+    if let Err(error) = result {
+        fail(events, error);
+    }
+    match store.tasks() {
+        Ok(tasks) => send(events, AppEvent::TasksUpdated(tasks)),
+        Err(error) => fail(events, error),
+    }
+}
+
+fn is_task_command(command: &AppCommand) -> bool {
+    matches!(
+        command,
+        AppCommand::AddTask(_)
+            | AppCommand::SetTaskComplete { .. }
+            | AppCommand::DeleteTask(_)
+            | AppCommand::ClearTasks { .. }
+    )
 }
 
 /// Save the user message and an empty reply placeholder; returns (user_id, reply_id).
@@ -309,79 +347,6 @@ fn begin_run(store: &Store, events: &EventSender, content: &str) -> Option<(i64,
             fail_run(store, events, error);
             None
         }
-    }
-}
-
-fn send_chat(
-    store: &Store,
-    runtime: &Runtime,
-    events: &EventSender,
-    settings: Settings,
-    content: String,
-    cancelled: &AtomicBool,
-) {
-    let Some((_, reply_id)) = begin_run(store, events, &content) else {
-        return;
-    };
-    let mut learned_limit = match context::active_context_limit(store, &settings) {
-        Ok(limit) => limit,
-        Err(error) => return fail_run(store, events, error),
-    };
-    let history =
-        match context::prepare(store, runtime, &settings, events, cancelled, learned_limit) {
-            Ok(history) => lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history),
-            Err(error) => return fail_run(store, events, error),
-        };
-    let mut messages = history;
-    let mut partial = String::new();
-    let mut checkpoint = std::time::Instant::now();
-    let mut checkpoint_error = None;
-    let mut context_retries = 0;
-    let result = loop {
-        let result = runtime.block_on(lm_studio::stream_chat(
-            &settings,
-            &messages,
-            cancelled,
-            |text| {
-                partial.push_str(&text);
-                if checkpoint.elapsed() >= std::time::Duration::from_millis(250) {
-                    if let Err(error) = store.replace_message_content(reply_id, &partial) {
-                        checkpoint_error = Some(error);
-                    }
-                    checkpoint = std::time::Instant::now();
-                }
-                send(events, AppEvent::ChatDelta { id: reply_id, text })
-            },
-        ));
-        let Err(error) = &result else {
-            break result;
-        };
-        if context_retries >= 2 || !partial.is_empty() || !lm_studio::is_context_limit(error) {
-            break result;
-        }
-        let limit = match context::learn_context_limit(store, &settings, events, &messages) {
-            Ok(limit) => limit,
-            Err(error) => return fail_run(store, events, error),
-        };
-        learned_limit = Some(limit);
-        context_retries += 1;
-        let history =
-            match context::prepare(store, runtime, &settings, events, cancelled, learned_limit) {
-                Ok(history) => history,
-                Err(error) => return fail_run(store, events, error),
-            };
-        messages = lm_studio::provider_messages(lm_studio::CHAT_PROMPT, &history);
-    };
-    if let Some(error) = store
-        .replace_message_content(reply_id, &partial)
-        .err()
-        .or(checkpoint_error)
-    {
-        return fail_run(store, events, error);
-    }
-    match result {
-        Ok(_) => send(events, AppEvent::ChatFinished { id: reply_id }),
-        Err(error) => provider_failed(store, events, cancelled, error),
     }
 }
 
